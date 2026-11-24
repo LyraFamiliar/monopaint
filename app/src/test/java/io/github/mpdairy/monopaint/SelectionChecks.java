@@ -4,7 +4,8 @@ import java.util.Arrays;
 
 public final class SelectionChecks {
     public static void main(String[] args) {
-        liftAndMove(); unmovedPlacesNothing(); loopShape(); quarterTurn(); scaleHoldsCorner(); handles();
+        liftAndMove(); unmovedPlacesNothing(); loopShape(); quarterTurn(); scaleHoldsCorner();
+        stretchAxis(); flipEdge(); flipCorner(); handles(); flippedKnob();
         importAsLayer(); importOntoLayer(); emptyLoop(); importedGrays();
         System.out.println("Selection checks passed");
     }
@@ -78,10 +79,87 @@ public final class SelectionChecks {
         piece.grab(FloatingSelection.SCALE + 2);
         piece.drag(FloatingSelection.SCALE + 2, c[4], c[5], c[4] + 20, c[5] + 20);
         float[] after = piece.corners();
-        check(Math.abs(piece.scale - 2) < 1e-4 && Math.abs(after[0] - c[0]) < 1e-3 && Math.abs(after[1] - c[1]) < 1e-3,
+        check(Math.abs(piece.scaleX - 2) < 1e-4 && Math.abs(piece.scaleY - 2) < 1e-4
+                && Math.abs(after[0] - c[0]) < 1e-3 && Math.abs(after[1] - c[1]) < 1e-3,
                 "Scaling holds the opposite corner still");
         piece.place(doc);
         check(doc.opacity(30, 20) == 255 && doc.opacity(68, 58) == 255 && doc.opacity(71, 61) == 0, "Scaled piece covers twice the size");
+    }
+    private static void stretchAxis() {
+        ToneDocument doc = square();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 120, 100), 4);
+        float[] before = piece.corners(), mid = piece.edgeMiddles();
+        // Drag right edge (edge 1) outward by 20px: widens only x, holds left edge (corners 0 and 3).
+        piece.grab(FloatingSelection.STRETCH + 1);
+        piece.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[2] + 20, mid[3] + 15);
+        piece.release();
+        float[] after = piece.corners();
+        check(Math.abs(piece.scaleX - 2) < 1e-4 && Math.abs(piece.scaleY - 1) < 1e-4, "Right edge stretches only x");
+        check(Math.abs(after[0] - before[0]) < 1e-3 && Math.abs(after[1] - before[1]) < 1e-3
+                && Math.abs(after[6] - before[6]) < 1e-3 && Math.abs(after[7] - before[7]) < 1e-3,
+                "Stretching right edge holds left edge still");
+        check(Math.abs(after[2] - (before[2] + 20)) < 1e-3 && Math.abs(after[3] - before[3]) < 1e-3,
+                "Right edge moves by the perpendicular drag distance");
+
+        // Rotate a quarter turn clockwise so edge 1 faces down: stretching edge 1 stretches page-vertically.
+        FloatingSelection turned = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        turned.grab(FloatingSelection.ROTATE);
+        turned.drag(FloatingSelection.ROTATE, turned.centerX, turned.centerY - 10, turned.centerX + 10, turned.centerY);
+        turned.release();
+        check(Math.abs(turned.angle - Math.PI / 2) < 1e-6, "Quarter turn before stretch");
+        float[] rBefore = turned.corners(), rMid = turned.edgeMiddles();
+        turned.grab(FloatingSelection.STRETCH + 1);
+        turned.drag(FloatingSelection.STRETCH + 1, rMid[2], rMid[3], rMid[2] + 10, rMid[3] + 20);
+        turned.release();
+        float[] rAfter = turned.corners();
+        check(Math.abs(turned.scaleX - 2) < 1e-4 && Math.abs(turned.scaleY - 1) < 1e-4,
+                "Rotated right edge still stretches only piece x");
+        check(Math.abs(rAfter[0] - rBefore[0]) < 1e-3 && Math.abs(rAfter[1] - rBefore[1]) < 1e-3
+                && Math.abs(rAfter[6] - rBefore[6]) < 1e-3 && Math.abs(rAfter[7] - rBefore[7]) < 1e-3,
+                "Rotated stretch holds the opposite edge still on the page");
+        check(Math.abs(rAfter[2] - rBefore[2]) < 1e-3 && Math.abs(rAfter[3] - (rBefore[3] + 20)) < 1e-3,
+                "Quarter-turned right edge stretches page-vertically");
+    }
+    private static void flipEdge() {
+        ToneDocument doc = square();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 120, 100), 4);
+        float[] before = piece.corners(), mid = piece.edgeMiddles();
+        piece.grab(FloatingSelection.STRETCH + 1);
+        // Right onto the opposite edge: never reaches zero size.
+        piece.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[6], mid[7]);
+        check(piece.scaleX > 0 && Math.abs(piece.scaleX * piece.width - 4) < 1e-3, "Edge drag clamps to minimum size at zero");
+        // Drag past the left edge by the piece's own width: exact 1:1 horizontal flip.
+        piece.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[6] - piece.width, mid[7]);
+        piece.release();
+        float[] after = piece.corners();
+        check(Math.abs(piece.scaleX + 1) < 1e-4 && Math.abs(piece.scaleY - 1) < 1e-4, "Dragging edge past opposite edge flips x");
+        check(Math.abs(after[0] - before[0]) < 1e-3 && Math.abs(after[6] - before[6]) < 1e-3, "Flipping holds the opposite edge");
+        check(!piece.unmoved(), "A flipped piece counts as moved");
+        check(piece.place(doc), "Flipped piece places");
+        for (int y = 20; y < 40; y++) for (int x = 0; x < 20; x++) {
+            check(doc.opacity(30 + x, y) == 0, "Original area cleared after flip");
+            check(doc.opacity(10 + x, y) == 255, "Flipped pixel has full coverage");
+            check(doc.layerTone(10 + x, y) == 59 - x, "1:1 horizontal flip mirrors pixels exactly");
+        }
+    }
+    private static void flipCorner() {
+        ToneDocument doc = square();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 120, 100), 4);
+        // Stretch x to 2 first so we also check ratio preservation through the flip.
+        float[] mid = piece.edgeMiddles();
+        piece.grab(FloatingSelection.STRETCH + 1);
+        piece.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[2] + 20, mid[3]);
+        piece.release();
+        float[] c = piece.corners();
+        piece.grab(FloatingSelection.SCALE + 2);
+        // Through the opposite corner (corner 0) to the exact mirrored point.
+        piece.drag(FloatingSelection.SCALE + 2, c[4], c[5], c[0] - (c[4] - c[0]), c[1] - (c[5] - c[1]));
+        piece.release();
+        float[] after = piece.corners();
+        check(Math.abs(piece.scaleX + 2) < 1e-4 && Math.abs(piece.scaleY + 1) < 1e-4,
+                "Corner drag through anchor flips both axes and keeps aspect ratio");
+        check(Math.abs(after[0] - c[0]) < 1e-3 && Math.abs(after[1] - c[1]) < 1e-3,
+                "Corner flip holds the anchor corner still");
     }
     private static void handles() {
         ToneDocument doc = square();
@@ -90,9 +168,12 @@ public final class SelectionChecks {
         piece.drag(FloatingSelection.SCALE + 2, 50, 40, 80, 70);
         piece.release();
         float[] knob = piece.knob(0, -1, 8, new float[]{0, 0, 120, 100});
+        float[] middles = piece.edgeMiddles();
         check(Math.abs(knob[0] - 55) < 1e-3 && Math.abs(knob[1] - 12) < 1e-3, "Knob stands above the top edge");
         check(piece.hit(55, 13, knob, 4) == FloatingSelection.ROTATE, "Knob turns");
         check(piece.hit(79, 69, knob, 4) == FloatingSelection.SCALE + 2, "Corner scales");
+        for (int i = 0; i < 4; i++)
+            check(piece.hit(middles[2*i], middles[2*i+1], knob, 4) == FloatingSelection.STRETCH + i, "Edge middle stretches");
         check(piece.hit(55, 50, knob, 4) == FloatingSelection.MOVE, "Inside moves");
         check(piece.hit(5, 5, knob, 4) == FloatingSelection.NONE, "Outside finishes");
         FloatingSelection top = FloatingSelection.lift(square(), box(30, 20, 50, 23), 4);
@@ -109,6 +190,32 @@ public final class SelectionChecks {
         check(turned[5] == 0 && turned[0] < 25, "Knob stays outside during a turn");
         middle.release();
         check(middle.knob(0, -1, 8, screen)[5] == 1, "Knob moves inside once the turn ends");
+    }
+    private static void flippedKnob() {
+        float[] screen = {0, 0, 120, 100};
+        // Knob already placed above top edge, then flipped horizontally: must stay outside above the top edge.
+        FloatingSelection horiz = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        check(horiz.knob(0, -1, 8, screen)[1] < 20, "Knob starts above top edge");
+        float[] mid = horiz.edgeMiddles();
+        horiz.grab(FloatingSelection.STRETCH + 1);
+        horiz.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[6] - horiz.width, mid[7]);
+        horiz.release();
+        float[] afterHoriz = horiz.knob(0, -1, 8, screen);
+        check(afterHoriz[5] == 0 && Math.abs(afterHoriz[0] - 20) < 1e-3 && Math.abs(afterHoriz[1] - 12) < 1e-3,
+                "Knob stays outside the top edge when flipped horizontally");
+        // Fresh piece flipped vertically before choosing knob edge: picks the edge facing up and stands outside it.
+        FloatingSelection vert = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        float[] vMid = vert.edgeMiddles();
+        vert.grab(FloatingSelection.STRETCH + 2);
+        vert.drag(FloatingSelection.STRETCH + 2, vMid[4], vMid[5], vMid[0], vMid[1] - vert.height);
+        vert.release();
+        float[] afterVert = vert.knob(0, -1, 8, new float[]{0, -20, 120, 100});
+        check(afterVert[5] == 0 && afterVert[4] == 2 && Math.abs(afterVert[0] - 40) < 1e-3 && Math.abs(afterVert[1] + 8) < 1e-3,
+                "Knob stands outside the edge facing up when flipped vertically");
+        // Without room above, the inside knob stays inside the piece using absolute size.
+        float[] insideVert = vert.knob(0, -1, 8, screen);
+        check(insideVert[5] == 1 && insideVert[1] > 0 && insideVert[1] < 20,
+                "Inside knob stays inside a flipped piece");
     }
     private static void importAsLayer() {
         ToneDocument doc = square();

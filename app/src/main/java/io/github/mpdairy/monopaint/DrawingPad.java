@@ -853,13 +853,16 @@ final class DrawingPad extends View {
         if (!dirty.isEmpty()) queue(dirty);
         drawSelectionFrame();
     }
-    /** Outlines the piece, with a dot on each corner to scale it and a knob to turn it. */
+    /** Outlines the piece, with dots on its corners and sides to resize, stretch or flip it, and a knob to turn it. */
     private void drawSelectionFrame() {
         if (selection == null || presented() == null) return;
         float[] corners = presentedPoints(selection.corners(), 4), knob = selectionKnob();
-        guide.add(presented(), corners, 4, true, corners, dp(5), this::queueView);
+        float[] edges = presentedPoints(selection.edgeMiddles(), 4);
         float[] stem = presentedPoints(new float[]{knob[2], knob[3], knob[0], knob[1]}, 2);
-        guide.add(presented(), stem, 2, false, new float[]{stem[2], stem[3]}, dp(8), this::queueView);
+        guide.add(presented(), corners, 4, true, null, 0, this::queueView);
+        guide.add(presented(), stem, 2, false, edges, dp(4), this::queueView);
+        guide.add(presented(), null, 0, false, corners, dp(5), this::queueView);
+        guide.add(presented(), null, 0, false, new float[]{stem[2], stem[3]}, dp(8), this::queueView);
     }
     /** Lays the floating piece on the page as one undo step. */
     void placeSelection() {

@@ -12,6 +12,10 @@ with each change; when cutting a release, turn that section into
   your pen, and sits just inside it when there's no room on screen. It keeps its proportions, and turns settle on
   quarter turns so a sideways piece stays crisp. Tap outside it, or pick any
   other tool, to put it down; Undo puts it back where it was.
+- **Stretch and flip Lasso pieces**: drag the smaller dot in the middle of any
+  side to stretch or squash the piece just that way while holding the opposite
+  side still, or drag a side dot (or corner dot) past the opposite side to flip
+  it.
 - **Import image…** in the menu brings a PNG or JPEG onto the page, on the
   current layer or a new one (it remembers which you picked last), fitted to the page or at its own size, and turned
   a quarter at a time with **Turn left** and **Turn right**, with a preview of

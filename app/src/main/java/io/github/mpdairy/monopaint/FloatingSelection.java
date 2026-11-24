@@ -2,15 +2,15 @@ package io.github.mpdairy.monopaint;
 
 /**
  * A piece of the active layer lifted by the Lasso, or an imported picture, floating over the
- * page. It moves, scales evenly and turns about its center; the page stays untouched until
- * {@link #place}, which lays it as one undo step.
+ * page. It moves, scales, stretches, flips and turns about its center; the page stays untouched
+ * until {@link #place}, which lays it as one undo step.
  *
- * <p>A page point p shows piece point q where p = center + R(angle) · scale · (q − size/2),
- * q in piece pixels.
+ * <p>A page point p shows piece point q where p = center + R(angle) · diag(scaleX, scaleY) · (q − size/2),
+ * q in piece pixels. Negative scale mirrors the piece along that axis.
  */
 final class FloatingSelection {
-    /** What a pen-down at a point grabs: nothing, the piece itself, its turning knob, or corner {@code SCALE + i}. */
-    static final int NONE = -1, MOVE = 0, ROTATE = 1, SCALE = 2;
+    /** What a pen-down at a point grabs: nothing, the piece itself, its turning knob, corner {@code SCALE + i}, or edge {@code STRETCH + i}. */
+    static final int NONE = -1, MOVE = 0, ROTATE = 1, SCALE = 2, STRETCH = 6;
     /** Turns within this many degrees of a quarter turn settle on it. */
     private static final double SNAP = 4;
     final int width, height;
@@ -22,11 +22,11 @@ final class FloatingSelection {
     /** Placed as a new layer above the active one rather than onto it. */
     final boolean newLayer;
     private final int pageWidth, pageHeight;
-    float centerX, centerY, scale = 1;
+    float centerX, centerY, scaleX = 1, scaleY = 1;
     /** Radians, clockwise on the page. */
     double angle;
-    // The pose when the current drag began, and the corner a scaling drag holds still.
-    private float startX, startY, startScale, anchorX, anchorY;
+    // The pose when the current drag began, the held point on the opposite corner/edge, and the stretch direction.
+    private float startX, startY, startScaleX, startScaleY, anchorX, anchorY, axisX, axisY;
     private double startAngle;
     /**
      * The edge the knob stands beside, chosen when first shown and kept as the piece turns, so
@@ -114,7 +114,7 @@ final class FloatingSelection {
     /** At its own size and a quarter turn, keeps the piece on whole pixels so placing it copies them exactly. */
     private void align() {
         double quarters = angle / (Math.PI / 2);
-        if (scale != 1 || quarters != Math.rint(quarters)) return;
+        if (Math.abs(scaleX) != 1 || Math.abs(scaleY) != 1 || quarters != Math.rint(quarters)) return;
         boolean sideways = Math.abs(Math.rint(quarters)) % 2 == 1;
         float across = sideways ? height : width, down = sideways ? width : height;
         centerX = Math.round(centerX - across / 2) + across / 2; centerY = Math.round(centerY - down / 2) + down / 2;
@@ -122,24 +122,36 @@ final class FloatingSelection {
 
     /** The page point showing piece point ({@code x}, {@code y}). */
     private float[] toPage(float x, float y) {
-        double c = Math.cos(angle) * scale, s = Math.sin(angle) * scale, dx = x - width / 2.0, dy = y - height / 2.0;
+        double c = Math.cos(angle), s = Math.sin(angle);
+        double dx = (x - width / 2.0) * scaleX, dy = (y - height / 2.0) * scaleY;
         return new float[]{(float)(centerX + c * dx - s * dy), (float)(centerY + s * dx + c * dy)};
     }
-    /** The four corners on the page, clockwise from the piece's top left: x, y pairs. */
+    /** The four corners on the page, from the piece's top left around its edges: x, y pairs. */
     float[] corners() {
         float[] corners = new float[8];
         float[][] at = {toPage(0, 0), toPage(width, 0), toPage(width, height), toPage(0, height)};
         for (int i = 0; i < 4; i++) { corners[2*i] = at[i][0]; corners[2*i+1] = at[i][1]; }
         return corners;
     }
+    /** The middles of the four edges on the page, edge {@code i} between corners i and i + 1: x, y pairs. */
+    float[] edgeMiddles() { return edgeMiddles(corners()); }
+    private static float[] edgeMiddles(float[] c) {
+        float[] middles = new float[8];
+        for (int i = 0; i < 4; i++) {
+            int next = (i + 1) % 4;
+            middles[2*i] = (c[2*i] + c[2*next]) / 2; middles[2*i+1] = (c[2*i+1] + c[2*next+1]) / 2;
+        }
+        return middles;
+    }
     /**
      * The page-to-piece transform, {a, b, c, d, e, f}: page pixel (x, y)'s center shows piece
      * point (a·x' + b·y' + c, d·x' + e·y' + f), where x' = x + ½ and y' = y + ½.
      */
     float[] inverse() {
-        double cos = Math.cos(angle) / scale, sin = Math.sin(angle) / scale;
-        return new float[]{(float)cos, (float)sin, (float)(width / 2.0 - cos * centerX - sin * centerY),
-                (float)-sin, (float)cos, (float)(height / 2.0 + sin * centerX - cos * centerY)};
+        double c = Math.cos(angle), s = Math.sin(angle);
+        double a = c / scaleX, b = s / scaleX, d = -s / scaleY, e = c / scaleY;
+        return new float[]{(float)a, (float)b, (float)(width / 2.0 - a * centerX - b * centerY),
+                (float)d, (float)e, (float)(height / 2.0 - d * centerX - e * centerY)};
     }
     /** The page pixels the piece covers now: left, top, right, bottom, clipped to the page; empty when off it. */
     int[] bounds() {
@@ -181,15 +193,16 @@ final class FloatingSelection {
         int next = (edge + 1) % 4;
         float midX = (c[2*edge] + c[2*next]) / 2, midY = (c[2*edge+1] + c[2*next+1]) / 2;
         // Inside, stay within the piece's nearer half.
-        if (inside) distance = -Math.min(distance, (edge % 2 == 0 ? height : width) * scale / 2);
+        if (inside) distance = -Math.min(distance, (edge % 2 == 0 ? height * Math.abs(scaleY) : width * Math.abs(scaleX)) / 2);
         return new float[]{midX + normal[0] * distance, midY + normal[1] * distance, midX, midY, edge, inside ? 1 : 0};
     }
     /** Unit normal pointing out of the piece from edge {@code i}, corner i to corner i + 1. */
-    private static float[] outward(float[] c, int i) {
+    private float[] outward(float[] c, int i) {
         int next = (i + 1) % 4;
         float dx = c[2*next] - c[2*i], dy = c[2*next+1] - c[2*i+1], length = (float)Math.hypot(dx, dy);
-        // Corners run clockwise on the page (y down), so the outside is to the left of each edge.
-        return length == 0 ? new float[]{0, -1} : new float[]{dy / length, -dx / length};
+        // Corners run clockwise when both scales share a sign, counter-clockwise when one is flipped.
+        float sign = scaleX * scaleY < 0 ? -1 : 1;
+        return length == 0 ? new float[]{0, -1} : new float[]{sign * dy / length, -sign * dx / length};
     }
 
     /**
@@ -201,30 +214,49 @@ final class FloatingSelection {
         float[] q = piecePoint(x, y);
         boolean inside = q[0] >= 0 && q[1] >= 0 && q[0] <= width && q[1] <= height;
         // A small piece is all handle, so it moves instead of scaling from inside itself.
-        if (inside && Math.min(width, height) * scale < 3 * reach) return MOVE;
+        if (inside && Math.min(width * Math.abs(scaleX), height * Math.abs(scaleY)) < 3 * reach) return MOVE;
         float[] c = corners();
-        int nearest = NONE; double best = reach;
-        for (int i = 0; i < 4; i++) {
-            double distance = Math.hypot(x - c[2*i], y - c[2*i+1]);
-            if (distance <= best) { best = distance; nearest = SCALE + i; }
-        }
-        if (nearest != NONE) return nearest;
+        int corner = nearest(x, y, c, reach, SCALE);
+        if (corner != NONE) return corner;
+        int edge = nearest(x, y, edgeMiddles(c), reach, STRETCH);
+        if (edge != NONE) return edge;
         return inside ? MOVE : NONE;
     }
+    private static int nearest(float x, float y, float[] points, float reach, int base) {
+        int found = NONE; double best = reach;
+        for (int i = 0; i < 4; i++) {
+            double distance = Math.hypot(x - points[2*i], y - points[2*i+1]);
+            if (distance <= best) { best = distance; found = base + i; }
+        }
+        return found;
+    }
     private float[] piecePoint(float x, float y) {
-        double c = Math.cos(-angle) / scale, s = Math.sin(-angle) / scale, dx = x - centerX, dy = y - centerY;
-        return new float[]{(float)(width / 2.0 + c * dx - s * dy), (float)(height / 2.0 + s * dx + c * dy)};
+        double c = Math.cos(angle), s = Math.sin(angle), dx = x - centerX, dy = y - centerY;
+        return new float[]{(float)(width / 2.0 + (c * dx + s * dy) / scaleX),
+                (float)(height / 2.0 + (-s * dx + c * dy) / scaleY)};
     }
 
     // Dragging
 
+    /** Clamps {@code value}'s magnitude to [{@code least}, {@code limit}], keeping its sign (or {@code fallback}'s at zero). */
+    private static double clampSigned(double value, double least, double limit, double fallback) {
+        double sign = value == 0 ? Math.signum(fallback) : Math.signum(value);
+        if (sign == 0) sign = 1;
+        return sign * Math.max(least, Math.min(limit, Math.abs(value)));
+    }
     /** Starts dragging {@code handle}. */
     void grab(int handle) {
-        startX = centerX; startY = centerY; startScale = scale; startAngle = angle;
+        startX = centerX; startY = centerY; startScaleX = scaleX; startScaleY = scaleY; startAngle = angle;
         turning = handle == ROTATE;
-        if (handle >= SCALE) {
+        if (handle >= SCALE && handle < STRETCH) {
             float[] c = corners(); int opposite = (handle - SCALE + 2) % 4;
             anchorX = c[2*opposite]; anchorY = c[2*opposite+1];
+        } else if (handle >= STRETCH) {
+            float[] c = corners(); int edge = handle - STRETCH, opposite = (edge + 2) % 4;
+            float[] middles = edgeMiddles(c);
+            anchorX = middles[2*opposite]; anchorY = middles[2*opposite+1];
+            float[] normal = outward(c, edge);
+            axisX = normal[0]; axisY = normal[1];
         }
     }
     /** Follows a drag of {@code handle} that began at ({@code fromX}, {@code fromY}) and is now at ({@code x}, {@code y}). */
@@ -239,22 +271,36 @@ final class FloatingSelection {
             angle = Math.IEEEremainder(angle, 2 * Math.PI);
             if (Math.abs(angle) < 1e-9) angle = 0;
             centerX = startX; centerY = startY; align();
-        } else if (handle >= SCALE) {
-            // Scale evenly by how far along the diagonal the corner has moved, holding the opposite corner still.
+        } else if (handle >= SCALE && handle < STRETCH) {
+            // Scale proportionally along the diagonal, holding the opposite corner; crossing it mirrors both axes.
             float gx = fromX - anchorX, gy = fromY - anchorY;
             double along = ((x - anchorX) * gx + (y - anchorY) * gy) / Math.max(1e-6, (double)gx * gx + (double)gy * gy);
-            double largest = Math.max(width, height), smallest = Math.min(width, height);
+            double spanX = width * Math.abs(startScaleX), spanY = height * Math.abs(startScaleY);
+            double largest = Math.max(spanX, spanY), smallest = Math.min(spanX, spanY);
             double limit = 2.0 * Math.max(pageWidth, pageHeight) / largest, least = Math.max(4 / smallest, 1 / largest);
-            scale = (float)Math.max(least, Math.min(limit, startScale * along));
-            float ratio = scale / startScale;
-            centerX = anchorX + (startX - anchorX) * ratio; centerY = anchorY + (startY - anchorY) * ratio;
+            double ratio = clampSigned(along, least, limit, 1);
+            scaleX = (float)(startScaleX * ratio); scaleY = (float)(startScaleY * ratio);
+            centerX = (float)(anchorX + (startX - anchorX) * ratio); centerY = (float)(anchorY + (startY - anchorY) * ratio);
+        } else if (handle >= STRETCH) {
+            // Stretch only along the grabbed edge's normal, holding the opposite edge; crossing it flips that axis.
+            boolean horizontal = (handle - STRETCH) % 2 == 1;
+            int size = horizontal ? width : height;
+            float start = horizontal ? startScaleX : startScaleY;
+            double span = size * Math.abs(start);
+            double delta = (x - fromX) * axisX + (y - fromY) * axisY;
+            double along = (span + delta) / span;
+            double limit = 2.0 * Math.max(pageWidth, pageHeight) / size, least = 4.0 / size;
+            double scaled = clampSigned(start * along, least, limit, start);
+            double ratio = scaled / start;
+            if (horizontal) scaleX = (float)scaled; else scaleY = (float)scaled;
+            centerX = (float)(anchorX + (startX - anchorX) * ratio); centerY = (float)(anchorY + (startY - anchorY) * ratio);
         }
     }
     /** Ends a drag. */
     void release() { turning = false; }
     /** Whether the piece would land just as it was lifted, changing nothing. */
     boolean unmoved() {
-        return lifted && angle == 0 && scale == 1 && centerX == cutX + width / 2f && centerY == cutY + height / 2f;
+        return lifted && angle == 0 && scaleX == 1 && scaleY == 1 && centerX == cutX + width / 2f && centerY == cutY + height / 2f;
     }
 
     // Placing

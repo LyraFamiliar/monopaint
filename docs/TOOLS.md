@@ -14,7 +14,7 @@ Tap a tool to select it. Tap it again to open its settings.
 | <img src="icons/shapes.svg" width="24"><br>**Shapes** | Lines, rectangles, squares, ovals and circles. |
 | <img src="icons/eraser.svg" width="24"><br>**Eraser** | Erases to reveal the layers below. A pen's eraser end or side button, if it has one, always uses this tool. |
 | <img src="icons/soften.svg" width="24"><br>**Blending stump** | Smudges shading in the direction you rub. |
-| <img src="icons/lasso.svg" width="24"><br>**Lasso** | Draw a loop around part of the current layer to pick it up. Drag inside it to move it, a corner dot to resize it (it keeps its proportions), or the round knob to turn it; turns settle on quarter turns. The knob turns with the piece, and sits just inside it when there's no room on screen. Tap outside it, or choose anything else, to put it down. Undo puts it back where it was. |
+| <img src="icons/lasso.svg" width="24"><br>**Lasso** | Draw a loop around part of the current layer to pick it up. Drag inside it to move it, a corner dot to resize it (it keeps its proportions), a side dot to stretch or squash it just that way, or the round knob to turn it; turns settle on quarter turns. Drag a side or corner dot past the opposite side to flip the piece. The knob turns with the piece, and sits just inside it when there's no room on screen. Tap outside it, or choose anything else, to put it down. Undo puts it back where it was. |
 
 ### Brush heads
 
