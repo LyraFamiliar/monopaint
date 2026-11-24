@@ -859,8 +859,10 @@ final class DrawingPad extends View {
         float[] corners = presentedPoints(selection.corners(), 4), knob = selectionKnob();
         float[] edges = presentedPoints(selection.edgeMiddles(), 4);
         float[] stem = presentedPoints(new float[]{knob[2], knob[3], knob[0], knob[1]}, 2);
+        // Lines first, then dots over them: the smaller side dots, the corners, the knob.
         guide.add(presented(), corners, 4, true, null, 0, this::queueView);
-        guide.add(presented(), stem, 2, false, edges, dp(4), this::queueView);
+        guide.add(presented(), stem, 2, false, null, 0, this::queueView);
+        guide.add(presented(), null, 0, false, edges, dp(4), this::queueView);
         guide.add(presented(), null, 0, false, corners, dp(5), this::queueView);
         guide.add(presented(), null, 0, false, new float[]{stem[2], stem[3]}, dp(8), this::queueView);
     }

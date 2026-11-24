@@ -297,7 +297,11 @@ final class FloatingSelection {
         }
     }
     /** Ends a drag. */
-    void release() { turning = false; }
+    void release() {
+        turning = false;
+        // A flip carries the knob's edge to the far side; choose again the edge that faces up.
+        if (Math.signum(scaleX) != Math.signum(startScaleX) || Math.signum(scaleY) != Math.signum(startScaleY)) knobEdge = -1;
+    }
     /** Whether the piece would land just as it was lifted, changing nothing. */
     boolean unmoved() {
         return lifted && angle == 0 && scaleX == 1 && scaleY == 1 && centerX == cutX + width / 2f && centerY == cutY + height / 2f;

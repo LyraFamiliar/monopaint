@@ -216,6 +216,16 @@ public final class SelectionChecks {
         float[] insideVert = vert.knob(0, -1, 8, screen);
         check(insideVert[5] == 1 && insideVert[1] > 0 && insideVert[1] < 20,
                 "Inside knob stays inside a flipped piece");
+        // Knob shown first, then flipped vertically: it moves back above the piece rather than below it.
+        FloatingSelection shown = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        float[] room = {0, -20, 120, 100};
+        check(shown.knob(0, -1, 8, room)[1] < 20, "Knob starts above the piece");
+        float[] sMid = shown.edgeMiddles();
+        shown.grab(FloatingSelection.STRETCH + 2);
+        shown.drag(FloatingSelection.STRETCH + 2, sMid[4], sMid[5], sMid[0], sMid[1] - shown.height);
+        shown.release();
+        float[] afterShown = shown.knob(0, -1, 8, room);
+        check(afterShown[5] == 0 && afterShown[1] < 0, "After a vertical flip the knob is above the piece again");
     }
     private static void importAsLayer() {
         ToneDocument doc = square();
