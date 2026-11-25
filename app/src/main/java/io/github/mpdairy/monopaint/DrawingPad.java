@@ -572,7 +572,7 @@ final class DrawingPad extends View {
     private boolean penDown(MotionEvent event, int index) {
         pagePoint(event.getX(index), event.getY(index));
         if (selection != null) {
-            float[] knob = selectionKnob();
+            float[] knob = selection.mode == FloatingSelection.TRANSFORM ? selectionKnob() : null;
             int handle = selection.hit(samplePoint[0], samplePoint[1], knob, dp(24) / pageScale());
             if (handle != FloatingSelection.NONE) { grabSelection(event, index, handle); return true; }
             placeSelection();
@@ -758,6 +758,14 @@ final class DrawingPad extends View {
 
     /** Whether a lifted piece or imported picture is floating over the page. */
     boolean hasSelection() { return selection != null; }
+    /** The floating selection's current interaction mode, or {@link FloatingSelection#TRANSFORM} when none floats. */
+    int selectionMode() { return selection == null ? FloatingSelection.TRANSFORM : selection.mode; }
+    /** Switches the floating selection's mode and redraws its frame without changing its shape. */
+    void setSelectionMode(int mode) {
+        if (selection == null || selectionHandle != FloatingSelection.NONE || selection.mode == mode) return;
+        selection.setMode(mode);
+        eraseGuide(); drawSelectionFrame(); flush(true);
+    }
     /** How many view pixels a page pixel spans. */
     private float pageScale() { return pageToView.mapRadius(1); }
     /** The selection's turning knob, beside the edge facing the top of the screen, and on it. */
@@ -840,12 +848,14 @@ final class DrawingPad extends View {
         selection.release(); selectionHandle = FloatingSelection.NONE; endPenPreview();
         // A knob that would have left the screen during a turn moves inside now.
         eraseGuide(); drawSelectionFrame(); flush(true);
+        if (app.selectionModeBar != null) app.selectionModeBar.refresh();
     }
     /** Floats {@code piece} over the page, placing any piece already floating first. */
     void floatSelection(FloatingSelection piece) {
         finishStroke(); dryWet();
         selection = piece; selectionPreview = new SelectionPreview(document, piece);
         showSelection(); flush(true);
+        app.showSelectionModeBar();
     }
     /** Redraws the piece where it lies now, with its frame. */
     private void showSelection() {
@@ -854,18 +864,22 @@ final class DrawingPad extends View {
         if (!dirty.isEmpty()) queue(dirty);
         drawSelectionFrame();
     }
-    /** Outlines the piece, with dots on its corners and sides to resize, stretch or flip it, and a knob to turn it. */
+    /** Outlines the piece, with dots on its corners and sides, plus a turning knob in Transform mode. */
     private void drawSelectionFrame() {
         if (selection == null || presented() == null) return;
-        float[] corners = presentedPoints(selection.corners(), 4), knob = selectionKnob();
+        float[] corners = presentedPoints(selection.corners(), 4);
         float[] edges = presentedPoints(selection.edgeMiddles(), 4);
-        float[] stem = presentedPoints(new float[]{knob[2], knob[3], knob[0], knob[1]}, 2);
+        float[] stem = null;
+        if (selection.mode == FloatingSelection.TRANSFORM) {
+            float[] knob = selectionKnob();
+            stem = presentedPoints(new float[]{knob[2], knob[3], knob[0], knob[1]}, 2);
+        }
         // Lines first, then dots over them: the smaller side dots, the corners, the knob.
         guide.add(presented(), corners, 4, true, null, 0, this::queueView);
-        guide.add(presented(), stem, 2, false, null, 0, this::queueView);
+        if (stem != null) guide.add(presented(), stem, 2, false, null, 0, this::queueView);
         guide.add(presented(), null, 0, false, edges, dp(4), this::queueView);
         guide.add(presented(), null, 0, false, corners, dp(5), this::queueView);
-        guide.add(presented(), null, 0, false, new float[]{stem[2], stem[3]}, dp(8), this::queueView);
+        if (stem != null) guide.add(presented(), null, 0, false, new float[]{stem[2], stem[3]}, dp(8), this::queueView);
     }
     /** Lays the floating piece on the page as one undo step. */
     void placeSelection() {
@@ -887,6 +901,7 @@ final class DrawingPad extends View {
     }
     /** Forgets the floating piece and its frame; returns the page pixels its preview covered. */
     private Rect endSelection() {
+        app.hideSelectionModeBar();
         eraseGuide();
         Rect area = selectionPreview.area();
         selection = null; selectionPreview = null;

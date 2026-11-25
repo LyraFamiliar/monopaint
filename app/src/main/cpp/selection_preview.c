@@ -26,16 +26,16 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
             || pieceWidth<1 || pieceHeight<1
             || (*env)->GetArrayLength(env,pieceTones)!=pieceWidth*pieceHeight
             || (*env)->GetArrayLength(env,pieceAlpha)!=pieceWidth*pieceHeight
-            || (*env)->GetArrayLength(env,inverse)!=6 || (*env)->GetArrayLength(env,dots)!=256*64
+            || (*env)->GetArrayLength(env,inverse)!=9 || (*env)->GetArrayLength(env,dots)!=256*64
             || left<0 || top<0 || right>(jint)info.width || bottom>(jint)info.height) {
         fail(env,"Invalid selection preview");return;
     }
     if(left>=right || top>=bottom)return;
     jint opacity[MAX_LAYERS];
     (*env)->GetIntArrayRegion(env,visible,0,count,opacity);
-    jfloat m[6];
-    (*env)->GetFloatArrayRegion(env,inverse,0,6,m);
-    for(int i=0;i<6;i++) if(!isfinite(m[i])) { fail(env,"Invalid selection transform");return; }
+    jfloat m[9];
+    (*env)->GetFloatArrayRegion(env,inverse,0,9,m);
+    for(int i=0;i<9;i++) if(!isfinite(m[i])) { fail(env,"Invalid selection transform");return; }
     void *pixels=NULL;
     if(AndroidBitmap_lockPixels(env,display,&pixels)!=ANDROID_BITMAP_RESULT_SUCCESS) {
         fail(env,"Cannot write selection preview");return;
@@ -46,16 +46,34 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
     jint *pattern=cover?(*env)->GetPrimitiveArrayCritical(env,dots,NULL):NULL;
     int ready=pattern!=NULL && layers_pin(env,&layers);
     const jint *dotted=logical?NULL:pattern;
+    int affine=m[6]==0.0f && m[7]==0.0f && m[8]==1.0f;
     if(ready)for(int y=top;y<bottom;y++) {
         uint32_t *out=(uint32_t *)((uint8_t *)pixels+(size_t)y*info.stride);
         size_t row=(size_t)y*info.width;
-        // Step along the row in piece coordinates.
-        float ux=m[0]*(left+.5f)+m[1]*(y+.5f)+m[2],uy=m[3]*(left+.5f)+m[4]*(y+.5f)+m[5];
+        float py=y+.5f;
+        float rowX=m[1]*py+m[2],rowY=m[4]*py+m[5],rowW=m[7]*py+m[8];
+        // Step along the row in piece coordinates on the affine fast path.
+        float ux=m[0]*(left+.5f)+rowX,uy=m[3]*(left+.5f)+rowY;
         int cutRow=lifted && y>=cutY && y<cutY+pieceHeight;
-        for(int x=left;x<right;x++,ux+=m[0],uy+=m[3]) {
+        for(int x=left;x<right;x++) {
             unsigned pieceTone=255,pieceCover=0;
-            if(ux>=0 && uy>=0 && ux<pieceWidth && uy<pieceHeight) {
-                size_t at=(size_t)(int)uy*pieceWidth+(int)ux;
+            float sx,sy;
+            int inside;
+            if(affine) {
+                sx=ux; sy=uy;
+                inside=sx>=0 && sy>=0 && sx<pieceWidth && sy<pieceHeight;
+                ux+=m[0]; uy+=m[3];
+            } else {
+                float px=x+.5f,w=m[6]*px+rowW;
+                if(w>0.0f) {
+                    sx=(m[0]*px+rowX)/w; sy=(m[3]*px+rowY)/w;
+                    inside=sx>=0 && sy>=0 && sx<pieceWidth && sy<pieceHeight;
+                } else {
+                    inside=0;
+                }
+            }
+            if(inside) {
+                size_t at=(size_t)(int)sy*pieceWidth+(int)sx;
                 pieceTone=ink[at]; pieceCover=cover[at];
             }
             unsigned value=255;

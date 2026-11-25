@@ -60,8 +60,10 @@ such as the gradient's direction or a selection's frame, and restores what was b
 
 A Lasso loop lifts a `FloatingSelection` from the active layer, and **Import image…**
 (`ImageImport`) floats a picture the same way. The piece moves, scales and turns over the
-page; `DrawingPad.placeSelection` lays it as one undo step when the pen lands elsewhere or
-any other action calls `finishStroke`, and Undo drops it instead (`cancelSelection`).
+page, with an optional local projective distortion quad applied in piece space under the
+affine pose (switched via `SelectionModeBar`); `DrawingPad.placeSelection` lays it as one
+undo step when the pen lands elsewhere or any other action calls `finishStroke`, and Undo
+drops it instead (`cancelSelection`).
 
 ## Documents
 

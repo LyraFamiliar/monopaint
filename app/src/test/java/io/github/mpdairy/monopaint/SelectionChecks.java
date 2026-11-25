@@ -7,9 +7,30 @@ public final class SelectionChecks {
         liftAndMove(); unmovedPlacesNothing(); loopShape(); quarterTurn(); scaleHoldsCorner();
         stretchAxis(); flipEdge(); flipCorner(); handles(); flippedKnob();
         importAsLayer(); importOntoLayer(); emptyLoop(); importedGrays();
+        undistortedInverse(); distortCorner(); distortTrapezoid(); skewEdge();
+        distortRejectsInvalid(); distortWithPose(); distortUnmovedAndMode(); distortHandles(); stretchDistortedHoldsEdge();
         System.out.println("Selection checks passed");
     }
     private static float[] box(float l, float t, float r, float b) { return new float[]{l, t, r, t, r, b, l, b}; }
+    /** Stretching an edge of a distorted piece in Transform mode holds the opposite edge's middle still. */
+    private static void stretchDistortedHoldsEdge() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(10, 10, 70, 60), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] c = piece.corners();
+        // Pull corner 0 (on the left edge) down and in, so that edge's middle leaves the piece's horizontal axis.
+        piece.grab(FloatingSelection.CORNER);
+        piece.drag(FloatingSelection.CORNER, c[0], c[1], c[0] + 6, c[1] + 8);
+        piece.release();
+        piece.setMode(FloatingSelection.TRANSFORM);
+        float[] mid = piece.edgeMiddles();
+        piece.grab(FloatingSelection.STRETCH + 1);
+        piece.drag(FloatingSelection.STRETCH + 1, mid[2], mid[3], mid[2] + 15, mid[3]);
+        piece.release();
+        float[] after = piece.edgeMiddles();
+        check(Math.abs(after[6] - mid[6]) < 1e-3 && Math.abs(after[7] - mid[7]) < 1e-3,
+                "Stretching a distorted piece holds the opposite edge's middle");
+        check(piece.scaleX > 1, "Stretch widened the distorted piece");
+    }
     private static ToneDocument square() {
         ToneDocument doc = new ToneDocument(120, 100);
         doc.begin();
@@ -262,6 +283,184 @@ public final class SelectionChecks {
             check(DotPattern.exportGray(DotPattern.importGray(exported)) == exported, "An exported gray imports as the tone it came from");
         }
         check(DotPattern.importGray(0) == 0 && DotPattern.importGray(255) == 255, "Black and white import unchanged");
+    }
+    private static void undistortedInverse() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.grab(FloatingSelection.SCALE + 2);
+        piece.drag(FloatingSelection.SCALE + 2, 50, 40, 70, 60);
+        piece.release();
+        piece.grab(FloatingSelection.ROTATE);
+        piece.drag(FloatingSelection.ROTATE, piece.centerX, piece.centerY - 10, piece.centerX + 10, piece.centerY);
+        piece.release();
+        float[] m = piece.inverse();
+        check(m.length == 9, "Inverse returns 9 floats");
+        check(m[6] == 0f && m[7] == 0f && m[8] == 1f, "Undistorted inverse has g=h=0, i=1");
+        double c = Math.cos(piece.angle), s = Math.sin(piece.angle);
+        double a = c / piece.scaleX, b = s / piece.scaleX, d = -s / piece.scaleY, e = c / piece.scaleY;
+        float[] expected = {(float)a, (float)b, (float)(piece.width / 2.0 - a * piece.centerX - b * piece.centerY),
+                (float)d, (float)e, (float)(piece.height / 2.0 - d * piece.centerX - e * piece.centerY)};
+        for (int i = 0; i < 6; i++)
+            check(m[i] == expected[i], "Undistorted inverse matches affine entry " + i);
+    }
+    private static void distortCorner() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] before = piece.corners();
+        piece.grab(FloatingSelection.CORNER + 2);
+        piece.drag(FloatingSelection.CORNER + 2, before[4], before[5], before[4] + 15, before[5] + 10);
+        piece.release();
+        float[] after = piece.corners();
+        check(Math.abs(after[4] - (before[4] + 15)) < 1e-3 && Math.abs(after[5] - (before[5] + 10)) < 1e-3,
+                "Dragged corner follows the pen");
+        for (int i : new int[]{0, 1, 3})
+            check(Math.abs(after[2*i] - before[2*i]) < 1e-3 && Math.abs(after[2*i+1] - before[2*i+1]) < 1e-3,
+                    "Undragged corner " + i + " stays put");
+        float[][] expectedPiece = {{0, 0}, {piece.width, 0}, {piece.width, piece.height}, {0, piece.height}};
+        float[] inv = piece.inverse();
+        for (int i = 0; i < 4; i++) {
+            float px = after[2*i], py = after[2*i+1];
+            float[] q = piece.piecePoint(px, py);
+            check(Math.abs(q[0] - expectedPiece[i][0]) < 1e-3 && Math.abs(q[1] - expectedPiece[i][1]) < 1e-3,
+                    "piecePoint maps page corner " + i + " back to piece corner");
+            float w = inv[6] * px + inv[7] * py + inv[8];
+            float ux = (inv[0] * px + inv[1] * py + inv[2]) / w;
+            float uy = (inv[3] * px + inv[4] * py + inv[5]) / w;
+            check(w > 0 && Math.abs(ux - expectedPiece[i][0]) < 1e-3 && Math.abs(uy - expectedPiece[i][1]) < 1e-3,
+                    "inverse maps page corner " + i + " back to piece corner");
+        }
+    }
+    private static void distortTrapezoid() {
+        ToneDocument doc = new ToneDocument(120, 100);
+        doc.begin();
+        for (int y = 20; y < 60; y++) for (int x = 30; x < 70; x++) doc.paintTone(x, y, 50);
+        doc.finish();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] c = piece.corners();
+        // Narrow top edge from 40px to 16px: move corner 0 right by 12, corner 1 left by 12.
+        piece.grab(FloatingSelection.CORNER + 0);
+        piece.drag(FloatingSelection.CORNER + 0, c[0], c[1], c[0] + 12, c[1]);
+        piece.release();
+        piece.grab(FloatingSelection.CORNER + 1);
+        piece.drag(FloatingSelection.CORNER + 1, c[2], c[3], c[2] - 12, c[3]);
+        piece.release();
+        check(piece.place(doc), "Trapezoid places");
+        int topRow = 0, bottomRow = 0, total = 0;
+        for (int y = 0; y < 100; y++) for (int x = 0; x < 120; x++) if (doc.opacity(x, y) > 0) {
+            total++;
+            if (y == 22) topRow++;
+            if (y == 57) bottomRow++;
+        }
+        check(topRow > 0 && bottomRow > topRow + 10, "Top rows of trapezoid have fewer covered pixels than bottom rows");
+        double expectedArea = (16 + 40) * 0.5 * 40; // 1120
+        check(Math.abs(total - expectedArea) / expectedArea < 0.05, "Trapezoid coverage matches area within 5%");
+    }
+    private static void skewEdge() {
+        // Vertical bar: 6px wide, 30px tall at x=30..36, y=20..50.
+        ToneDocument doc = new ToneDocument(120, 100);
+        doc.begin();
+        for (int y = 20; y < 50; y++) for (int x = 30; x < 36; x++) doc.paintTone(x, y, 40);
+        doc.finish();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] before = piece.corners(), mid = piece.edgeMiddles();
+        piece.grab(FloatingSelection.EDGE + 0);
+        piece.drag(FloatingSelection.EDGE + 0, mid[0], mid[1], mid[0] + 20, mid[1]);
+        piece.release();
+        float[] after = piece.corners();
+        check(Math.abs(after[0] - (before[0] + 20)) < 1e-3 && Math.abs(after[1] - before[1]) < 1e-3
+                && Math.abs(after[2] - (before[2] + 20)) < 1e-3 && Math.abs(after[3] - before[3]) < 1e-3,
+                "Skewing top edge shifts corners 0 and 1 by 20px");
+        check(Math.abs(after[4] - before[4]) < 1e-3 && Math.abs(after[5] - before[5]) < 1e-3
+                && Math.abs(after[6] - before[6]) < 1e-3 && Math.abs(after[7] - before[7]) < 1e-3,
+                "Skewing top edge leaves corners 2 and 3 still");
+        check(piece.place(doc), "Skewed bar places");
+        double topMean = rowCenterX(doc, 21), bottomMean = rowCenterX(doc, 48);
+        check(topMean > bottomMean + 15, "Skewing shears vertical bar so top shifts right relative to bottom");
+    }
+    private static double rowCenterX(ToneDocument doc, int y) {
+        double sum = 0; int count = 0;
+        for (int x = 0; x < doc.width; x++) if (doc.opacity(x, y) > 0) { sum += x; count++; }
+        check(count > 0, "Row " + y + " has pixels");
+        return sum / count;
+    }
+    private static void distortRejectsInvalid() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] c = piece.corners();
+        piece.grab(FloatingSelection.CORNER + 0);
+        // First drag to a valid slight inset.
+        piece.drag(FloatingSelection.CORNER + 0, c[0], c[1], c[0] + 3, c[1] + 3);
+        float[] lastValid = piece.corners();
+        check(Math.abs(lastValid[0] - (c[0] + 3)) < 1e-3 && Math.abs(lastValid[1] - (c[1] + 3)) < 1e-3,
+                "Valid distort drag applies");
+        // Now drag corner 0 past the diagonal between corner 1 and corner 3 -> non-convex.
+        piece.drag(FloatingSelection.CORNER + 0, c[0], c[1], c[4] - 2, c[5] - 2);
+        float[] afterInvalid = piece.corners();
+        for (int i = 0; i < 8; i++)
+            check(afterInvalid[i] == lastValid[i], "Non-convex drag is rejected and keeps last valid quad");
+        piece.release();
+    }
+    private static void distortWithPose() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] c0 = piece.corners();
+        piece.grab(FloatingSelection.CORNER + 2);
+        piece.drag(FloatingSelection.CORNER + 2, c0[4], c0[5], c0[4] + 12, c0[5] + 6);
+        piece.release();
+        piece.setMode(FloatingSelection.TRANSFORM);
+        float[] beforeMove = piece.corners();
+        piece.grab(FloatingSelection.MOVE);
+        piece.drag(FloatingSelection.MOVE, 40, 30, 70, 40);
+        piece.release();
+        float[] afterMove = piece.corners();
+        for (int i = 0; i < 4; i++)
+            check(Math.abs(afterMove[2*i] - (beforeMove[2*i] + 30)) < 1e-3
+                    && Math.abs(afterMove[2*i+1] - (beforeMove[2*i+1] + 10)) < 1e-3,
+                    "TRANSFORM MOVE shifts all distorted corners by (30, 10)");
+        // Rotate by a quarter turn: all pairwise distances between corners stay equal.
+        piece.grab(FloatingSelection.ROTATE);
+        piece.drag(FloatingSelection.ROTATE, piece.centerX, piece.centerY - 10, piece.centerX + 10, piece.centerY);
+        piece.release();
+        check(Math.abs(piece.angle - Math.PI / 2) < 1e-6, "Distorted piece snaps to quarter turn");
+        float[] afterTurn = piece.corners();
+        for (int i = 0; i < 4; i++) for (int j = i + 1; j < 4; j++) {
+            double dBefore = Math.hypot(afterMove[2*j] - afterMove[2*i], afterMove[2*j+1] - afterMove[2*i+1]);
+            double dAfter = Math.hypot(afterTurn[2*j] - afterTurn[2*i], afterTurn[2*j+1] - afterTurn[2*i+1]);
+            check(Math.abs(dBefore - dAfter) < 1e-3, "Quarter turn preserves distorted corner distances");
+        }
+    }
+    private static void distortUnmovedAndMode() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        check(piece.unmoved(), "Fresh piece is unmoved");
+        float[] beforeSwitch = piece.corners();
+        piece.setMode(FloatingSelection.DISTORT);
+        check(Arrays.equals(beforeSwitch, piece.corners()), "Switching to DISTORT does not change corners");
+        piece.grab(FloatingSelection.CORNER + 1);
+        piece.drag(FloatingSelection.CORNER + 1, beforeSwitch[2], beforeSwitch[3], beforeSwitch[2] + 5, beforeSwitch[3]);
+        piece.release();
+        check(!piece.unmoved(), "Distorted piece is not unmoved");
+        float[] distortedCorners = piece.corners();
+        piece.setMode(FloatingSelection.TRANSFORM);
+        check(Arrays.equals(distortedCorners, piece.corners()), "Switching back to TRANSFORM does not change corners");
+    }
+    private static void distortHandles() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        float[] knob = piece.knob(0, -1, 8, new float[]{0, 0, 120, 100});
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] c = piece.corners(), m = piece.edgeMiddles();
+        for (int i = 0; i < 4; i++) {
+            check(piece.hit(c[2*i], c[2*i+1], knob, 4) == FloatingSelection.CORNER + i,
+                    "DISTORT hit returns CORNER+" + i);
+            check(piece.hit(m[2*i], m[2*i+1], knob, 4) == FloatingSelection.EDGE + i,
+                    "DISTORT hit returns EDGE+" + i);
+        }
+        check(piece.hit(piece.centerX, piece.centerY, knob, 4) == FloatingSelection.MOVE,
+                "DISTORT hit inside returns MOVE");
+        check(piece.hit(knob[0], knob[1], knob, 4) == FloatingSelection.NONE,
+                "DISTORT hit at knob position returns NONE");
+        check(piece.hit(5, 5, knob, 4) == FloatingSelection.NONE,
+                "DISTORT hit outside returns NONE");
     }
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
 }

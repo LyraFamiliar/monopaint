@@ -97,6 +97,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     // Panels. At most one popup is open at a time.
     PopupWindow toolPicker, filePopup, layersPopup;
     PaletteEditor paletteEditor;
+    SelectionModeBar selectionModeBar;
     AlertDialog pageOverview, pageConfirmation;
     QuarterTurnLayout pagePanel;
     private TextView popupPageNumber;
@@ -700,6 +701,16 @@ public final class PaintActivity extends Activity implements ControlHost {
         paletteEditor = new PaletteEditor(this); paletteEditor.show();
     }
     void closePaletteEditor() { if (paletteEditor != null) paletteEditor.popup.dismiss(); }
+    void showSelectionModeBar() {
+        hideSelectionModeBar();
+        if (pad == null || !pad.hasSelection() || root == null || root.getWindowToken() == null
+                || pad.getWidth() <= 0 || pad.getHeight() <= 0) return;
+        selectionModeBar = new SelectionModeBar(this);
+        selectionModeBar.show();
+    }
+    void hideSelectionModeBar() {
+        if (selectionModeBar != null) { SelectionModeBar bar = selectionModeBar; selectionModeBar = null; bar.dismiss(); }
+    }
     void savePalette(List<Integer> shades) { prefs.setPaletteShades(shades); toolbar.showPaletteShades(shades); }
     AlertDialog appSettings() { closePagePanel(); return new AppSettingsDialog(this).dialog; }
 
@@ -1188,6 +1199,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     }
     @Override protected void onDestroy() {
         destroyed = true;
+        hideSelectionModeBar();
         if (rotationPrompt != null) rotationPrompt.orientationSensor.disable();
         selectionFeedback.close();
         layerFeedback.close();
