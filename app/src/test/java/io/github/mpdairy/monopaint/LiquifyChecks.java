@@ -180,7 +180,8 @@ public final class LiquifyChecks {
         // Single vertical bar dead-center at x=135..145 (100px from both stroke endpoints 40 and 240, far beyond R=24).
         ToneDocument fastDoc = centerBar(w, h, 135, 145);
         ToneDocument slowDoc = centerBar(w, h, 135, 145);
-        ToolSettings settings = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).size(48).minimum(48).strength(50);
+        // Strong enough for a clear push to compare; Strength eases in, so 50% would move it little.
+        ToolSettings settings = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).size(48).minimum(48).strength(80);
 
         double beforeX = centerOfMass(fastDoc)[0];
         LiquifyStroke fast = new LiquifyStroke(fastDoc, settings);

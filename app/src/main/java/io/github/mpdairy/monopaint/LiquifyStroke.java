@@ -70,10 +70,10 @@ final class LiquifyStroke implements DrawingStroke {
             float maxStep = Math.max(.125f, Math.min(lastRadius, radius) / 4f);
             int steps = Math.max(1, (int)Math.ceil(dist / maxStep));
             float stepMx = mx / steps, stepMy = my / steps;
-            // A light touch already pushes firmly, and the push rises quickly with Strength:
-            // half strength moves the paint about three quarters of the way with the pen.
+            // A light touch already pushes firmly. Strength eases in, tuned on a Nomad: 50% moves
+            // the paint about a third of the way with the pen, 80% about three quarters.
             float s = settings.strength / 100f;
-            float strength = (1 - (1 - s) * (1 - s)) * (.4f + .6f * (float)Math.sqrt(p));
+            float strength = (float)Math.pow(s, 1.4) * (.4f + .6f * (float)Math.sqrt(p));
             for (int i = 1; i <= steps; i++) {
                 float t = (float)i / steps;
                 float r = lastRadius + (radius - lastRadius) * t;
