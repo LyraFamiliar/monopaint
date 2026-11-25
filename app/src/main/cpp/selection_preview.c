@@ -13,7 +13,9 @@ JNIEXPORT void JNICALL
 Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass clazz,jobject display,
         jobjectArray tones,jobjectArray alpha,jintArray visible,jint target,jboolean newLayer,
         jbyteArray pieceTones,jbyteArray pieceAlpha,jint pieceWidth,jint pieceHeight,
-        jboolean lifted,jint cutX,jint cutY,jfloatArray inverse,jintArray dots,jboolean logical,
+        jboolean lifted,jint cutX,jint cutY,jfloatArray inverse,
+        jfloatArray map,jint mapLeft,jint mapTop,jint mapWidth,jint mapHeight,
+        jintArray dots,jboolean logical,
         jint left,jint top,jint right,jint bottom) {
     (void)clazz;
     AndroidBitmapInfo info;
@@ -26,7 +28,12 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
             || pieceWidth<1 || pieceHeight<1
             || (*env)->GetArrayLength(env,pieceTones)!=pieceWidth*pieceHeight
             || (*env)->GetArrayLength(env,pieceAlpha)!=pieceWidth*pieceHeight
-            || (*env)->GetArrayLength(env,inverse)!=9 || (*env)->GetArrayLength(env,dots)!=256*64
+            || (*env)->GetArrayLength(env,inverse)!=9 || map==NULL
+            || mapWidth<0 || mapHeight<0
+            || (mapWidth>0 && (mapHeight<=0 || mapLeft<0 || mapTop<0
+                    || mapWidth>(jint)info.width-mapLeft || mapHeight>(jint)info.height-mapTop
+                    || (size_t)(*env)->GetArrayLength(env,map)<(size_t)2*(size_t)mapWidth*(size_t)mapHeight))
+            || (*env)->GetArrayLength(env,dots)!=256*64
             || left<0 || top<0 || right>(jint)info.width || bottom>(jint)info.height) {
         fail(env,"Invalid selection preview");return;
     }
@@ -43,7 +50,8 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
     // Lock the bitmap before pinning arrays; nothing below allocates or calls back into Java.
     const uint8_t *ink=(*env)->GetPrimitiveArrayCritical(env,pieceTones,NULL);
     const uint8_t *cover=ink?(*env)->GetPrimitiveArrayCritical(env,pieceAlpha,NULL):NULL;
-    jint *pattern=cover?(*env)->GetPrimitiveArrayCritical(env,dots,NULL):NULL;
+    const jfloat *coords=(cover && mapWidth>0)?(*env)->GetPrimitiveArrayCritical(env,map,NULL):NULL;
+    jint *pattern=(cover && (mapWidth==0 || coords))?(*env)->GetPrimitiveArrayCritical(env,dots,NULL):NULL;
     int ready=pattern!=NULL && layers_pin(env,&layers);
     const jint *dotted=logical?NULL:pattern;
     int affine=m[6]==0.0f && m[7]==0.0f && m[8]==1.0f;
@@ -55,11 +63,21 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
         // Step along the row in piece coordinates on the affine fast path.
         float ux=m[0]*(left+.5f)+rowX,uy=m[3]*(left+.5f)+rowY;
         int cutRow=lifted && y>=cutY && y<cutY+pieceHeight;
+        int mapRow=mapWidth>0 && y>=mapTop && y<mapTop+mapHeight;
+        const jfloat *rowCoords=mapRow?coords+(size_t)(y-mapTop)*(size_t)mapWidth*2:NULL;
         for(int x=left;x<right;x++) {
             unsigned pieceTone=255,pieceCover=0;
             float sx,sy;
             int inside;
-            if(affine) {
+            if(mapWidth>0) {
+                if(mapRow && x>=mapLeft && x<mapLeft+mapWidth) {
+                    size_t ci=(size_t)(x-mapLeft)*2;
+                    sx=rowCoords[ci]; sy=rowCoords[ci+1];
+                    inside=sx>=0.0f && sy>=0.0f && sx<(float)pieceWidth && sy<(float)pieceHeight;
+                } else {
+                    inside=0;
+                }
+            } else if(affine) {
                 sx=ux; sy=uy;
                 inside=sx>=0 && sy>=0 && sx<pieceWidth && sy<pieceHeight;
                 ux+=m[0]; uy+=m[3];
@@ -97,6 +115,7 @@ Java_io_github_mpdairy_monopaint_SelectionPreview_nativeApply(JNIEnv *env,jclass
     }
     layers_release(env,&layers);
     if(pattern)(*env)->ReleasePrimitiveArrayCritical(env,dots,pattern,JNI_ABORT);
+    if(coords)(*env)->ReleasePrimitiveArrayCritical(env,map,(void *)coords,JNI_ABORT);
     if(cover)(*env)->ReleasePrimitiveArrayCritical(env,pieceAlpha,(void *)cover,JNI_ABORT);
     if(ink)(*env)->ReleasePrimitiveArrayCritical(env,pieceTones,(void *)ink,JNI_ABORT);
     AndroidBitmap_unlockPixels(env,display);

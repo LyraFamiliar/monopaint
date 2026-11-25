@@ -11,13 +11,13 @@ import io.github.mpdairy.fasteink.PanelCoordinates;
 
 /**
  * Floating mode bar shown at the top-centre of the canvas while a {@link FloatingSelection}
- * floats, switching between Transform and Distort (with room for future modes such as Warp).
+ * floats, switching between Transform, Distort and Warp.
  * Uses a non-focusable popup in the app's upright coordinates so taps never place the selection
  * and pen drags on the canvas stay active.
  */
 final class SelectionModeBar {
-    private static final String[] LABELS = {"Transform", "Distort"};
-    private static final int[] MODES = {FloatingSelection.TRANSFORM, FloatingSelection.DISTORT};
+    private static final String[] LABELS = {"Transform", "Distort", "Warp"};
+    private static final int[] MODES = {FloatingSelection.TRANSFORM, FloatingSelection.DISTORT, FloatingSelection.WARP};
 
     private final PaintActivity app;
     private final LinearLayout bar;

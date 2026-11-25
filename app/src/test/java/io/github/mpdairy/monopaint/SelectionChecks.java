@@ -9,6 +9,8 @@ public final class SelectionChecks {
         importAsLayer(); importOntoLayer(); emptyLoop(); importedGrays();
         undistortedInverse(); distortCorner(); distortTrapezoid(); skewEdge();
         distortRejectsInvalid(); distortWithPose(); distortUnmovedAndMode(); distortHandles(); stretchDistortedHoldsEdge();
+        warpSwitchChangesNothing(); warpZeroDragReproducesUnwarped(); warpPullBendsSurface();
+        warpPointMovesControlPoint(); warpMapCoverage(); distortOnWarpedPiece(); warpHandles(); poseOpsOnWarpedPiece();
         System.out.println("Selection checks passed");
     }
     private static float[] box(float l, float t, float r, float b) { return new float[]{l, t, r, t, r, b, l, b}; }
@@ -461,6 +463,237 @@ public final class SelectionChecks {
                 "DISTORT hit at knob position returns NONE");
         check(piece.hit(5, 5, knob, 4) == FloatingSelection.NONE,
                 "DISTORT hit outside returns NONE");
+    }
+    private static void warpSwitchChangesNothing() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        float[] cornersBefore = piece.corners();
+        int[] boundsBefore = piece.bounds();
+        check(piece.unmoved(), "Fresh piece starts unmoved");
+        piece.setMode(FloatingSelection.WARP);
+        check(!piece.warped(), "Switching to WARP does not create patch");
+        check(Arrays.equals(cornersBefore, piece.corners()), "Switching to WARP leaves corners unchanged");
+        check(Arrays.equals(boundsBefore, piece.bounds()), "Switching to WARP leaves bounds unchanged");
+        check(piece.unmoved(), "Switching to WARP leaves unmoved unchanged");
+    }
+    private static void warpZeroDragReproducesUnwarped() {
+        ToneDocument unwarpedDoc = new ToneDocument(120, 100);
+        unwarpedDoc.begin();
+        for (int y = 20; y < 60; y++) for (int x = 30; x < 70; x++)
+            unwarpedDoc.paintTone(x, y, 20 + (x - 30) * 3 + (y - 20) * 2);
+        unwarpedDoc.finish();
+
+        ToneDocument warpedDoc = new ToneDocument(120, 100);
+        warpedDoc.begin();
+        for (int y = 20; y < 60; y++) for (int x = 30; x < 70; x++)
+            warpedDoc.paintTone(x, y, 20 + (x - 30) * 3 + (y - 20) * 2);
+        warpedDoc.finish();
+
+        // Move both identically so both place() calls write fresh pixels onto bare paper.
+        FloatingSelection unwarped = FloatingSelection.lift(unwarpedDoc, box(0, 0, 120, 100), 4);
+        unwarped.grab(FloatingSelection.MOVE);
+        unwarped.drag(FloatingSelection.MOVE, 50, 40, 65, 50);
+        unwarped.release();
+        check(unwarped.place(unwarpedDoc), "Unwarped moved piece places");
+
+        FloatingSelection warped = FloatingSelection.lift(warpedDoc, box(0, 0, 120, 100), 4);
+        warped.grab(FloatingSelection.MOVE);
+        warped.drag(FloatingSelection.MOVE, 50, 40, 65, 50);
+        warped.release();
+        warped.setMode(FloatingSelection.WARP);
+        warped.grab(FloatingSelection.PULL);
+        warped.drag(FloatingSelection.PULL, 65, 50, 65, 50);
+        warped.release();
+        check(warped.warped() && !warped.unmoved(), "Zero warp drag initializes patch");
+        check(warped.place(warpedDoc), "Zero-drag warped piece places");
+
+        int differing = 0;
+        for (int y = 0; y < warpedDoc.height; y++) for (int x = 0; x < warpedDoc.width; x++) {
+            if (warpedDoc.opacity(x, y) != unwarpedDoc.opacity(x, y)
+                    || (warpedDoc.opacity(x, y) > 0 && warpedDoc.layerTone(x, y) != unwarpedDoc.layerTone(x, y))) {
+                differing++;
+            }
+        }
+        int area = warped.width * warped.height;
+        check(differing < area * 0.02, "Zero-drag warp matches unwarped placement (<2% diff), got " + differing);
+    }
+    private static void warpPullBendsSurface() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.WARP);
+        float cx = piece.centerX, cy = piece.centerY;
+        piece.grab(FloatingSelection.PULL);
+        piece.drag(FloatingSelection.PULL, cx, cy, cx, cy + 15);
+        piece.release();
+        float[] after = piece.toPage(piece.width / 2f, piece.height / 2f);
+        check(Math.hypot(after[0] - cx, after[1] - (cy + 15)) < 0.5,
+                "Pulled centre point follows pen within 0.5px");
+
+        // Horizontal bar: 60px wide, 10px tall at x=20..80, y=30..40.
+        ToneDocument bar = new ToneDocument(120, 100);
+        bar.begin();
+        for (int y = 30; y < 40; y++) for (int x = 20; x < 80; x++) bar.paintTone(x, y, 40);
+        bar.finish();
+        FloatingSelection barPiece = FloatingSelection.lift(bar, box(0, 0, 120, 100), 4);
+        barPiece.setMode(FloatingSelection.WARP);
+        barPiece.grab(FloatingSelection.PULL);
+        barPiece.drag(FloatingSelection.PULL, 50, 35, 50, 50);
+        barPiece.release();
+        check(barPiece.place(bar), "Pulled bar places");
+        int midLow = lowestCoveredRow(bar, 50);
+        int leftLow = lowestCoveredRow(bar, 22);
+        int rightLow = lowestCoveredRow(bar, 77);
+        check(midLow > leftLow + 5 && midLow > rightLow + 5,
+                "Pulled horizontal bar bends lower in the middle than at its ends");
+    }
+    private static int lowestCoveredRow(ToneDocument doc, int x) {
+        for (int y = doc.height - 1; y >= 0; y--) if (doc.opacity(x, y) > 0) return y;
+        throw new AssertionError("Column " + x + " has no covered pixels");
+    }
+    private static void warpPointMovesControlPoint() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.WARP);
+        float[] before = piece.controlPoints();
+        int[] boundsBefore = piece.bounds();
+        // Small interior move keeps the patch within its original rectangle (padded by 1px).
+        piece.grab(FloatingSelection.POINT + 5);
+        piece.drag(FloatingSelection.POINT + 5, before[10], before[11], before[10] + 2, before[11] + 3);
+        piece.release();
+        float[] afterSmall = piece.controlPoints();
+        check(Math.abs(afterSmall[10] - (before[10] + 2)) < 1e-3 && Math.abs(afterSmall[11] - (before[11] + 3)) < 1e-3,
+                "Dragging control point 5 moves it by the local delta");
+        for (int k = 0; k < 16; k++) if (k != 5) {
+            check(Math.abs(afterSmall[2*k] - before[2*k]) < 1e-3 && Math.abs(afterSmall[2*k+1] - before[2*k+1]) < 1e-3,
+                    "Undragged control point " + k + " stays put");
+        }
+        int[] boundsSmall = piece.bounds();
+        check(boundsSmall[0] >= boundsBefore[0] - 1 && boundsSmall[1] >= boundsBefore[1] - 1
+                && boundsSmall[2] <= boundsBefore[2] + 1 && boundsSmall[3] <= boundsBefore[3] + 1,
+                "Small interior point drag keeps bounds within original padded rectangle");
+
+        // Large drag pushes the surface past the bottom edge (B_1(1/3)^2 = 16/81) and expands bounds()[3].
+        piece.grab(FloatingSelection.POINT + 5);
+        piece.drag(FloatingSelection.POINT + 5, afterSmall[10], afterSmall[11], afterSmall[10], afterSmall[11] + 120);
+        piece.release();
+        int[] boundsBig = piece.bounds();
+        check(boundsBig[3] > boundsBefore[3] + 5, "Large interior point drag expands bottom bound");
+    }
+    private static void warpMapCoverage() {
+        ToneDocument doc = new ToneDocument(140, 120);
+        doc.begin();
+        for (int y = 20; y < 60; y++) for (int x = 30; x < 70; x++) doc.paintTone(x, y, 50);
+        doc.finish();
+        FloatingSelection piece = FloatingSelection.lift(doc, box(0, 0, 140, 120), 4);
+        piece.setMode(FloatingSelection.WARP);
+        piece.grab(FloatingSelection.PULL);
+        piece.drag(FloatingSelection.PULL, 50, 40, 56, 52);
+        piece.release();
+        float[] cp = piece.controlPoints();
+        piece.grab(FloatingSelection.POINT + 10);
+        piece.drag(FloatingSelection.POINT + 10, cp[20], cp[21], cp[20] + 8, cp[21] - 6);
+        piece.release();
+
+        int[] b = piece.bounds();
+        WarpMap map = new WarpMap();
+        map.rasterize(piece, b[0], b[1], b[2] - b[0], b[3] - b[1]);
+        float[] firstBuffer = map.coords;
+        for (int vi = 3; vi <= 17; vi++) for (int ui = 3; ui <= 17; ui++) {
+            float u = ui / 20f, v = vi / 20f;
+            float[] p = piece.toPage(u * piece.width, v * piece.height);
+            int px = (int)Math.floor(p[0]), py = (int)Math.floor(p[1]);
+            check(px >= map.left && px < map.left + map.width && py >= map.top && py < map.top + map.height,
+                    "Interior warped point lies inside bounds");
+            int idx = 2 * ((py - map.top) * map.width + (px - map.left));
+            float sx = map.coords[idx], sy = map.coords[idx + 1];
+            check(Float.isFinite(sx) && Float.isFinite(sy) && sx >= 0 && sx < piece.width && sy >= 0 && sy < piece.height,
+                    "WarpMap has no NaN holes strictly inside at (" + px + "," + py + ")");
+        }
+        // Buffer is reused (grow-only) across frames.
+        map.rasterize(piece, b[0], b[1], Math.max(1, (b[2] - b[0]) / 2), Math.max(1, (b[3] - b[1]) / 2));
+        check(map.coords == firstBuffer, "WarpMap reuses its coordinate buffer without reallocating");
+    }
+    private static void distortOnWarpedPiece() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.WARP);
+        piece.grab(FloatingSelection.PULL);
+        piece.drag(FloatingSelection.PULL, 40, 30, 40, 34);
+        piece.release();
+
+        piece.setMode(FloatingSelection.DISTORT);
+        float[] before = piece.controlPoints();
+        float[] c = piece.corners();
+        piece.grab(FloatingSelection.CORNER + 0);
+        piece.drag(FloatingSelection.CORNER + 0, c[0], c[1], c[0] + 10, c[1] - 6);
+        piece.release();
+        float[] after = piece.controlPoints();
+        for (int k = 0; k < 16; k++) {
+            boolean moved = k == 0 || k == 1 || k == 4;
+            float dx = moved ? 10 : 0, dy = moved ? -6 : 0;
+            check(Math.abs(after[2*k] - (before[2*k] + dx)) < 1e-3
+                    && Math.abs(after[2*k+1] - (before[2*k+1] + dy)) < 1e-3,
+                    "Distort corner 0 on warped piece updates control point " + k + " as expected");
+        }
+        // Dragging an edge in DISTORT mode moves all 4 control points of that edge.
+        float[] beforeEdge = piece.controlPoints(), mid = piece.edgeMiddles();
+        piece.grab(FloatingSelection.EDGE + 0);
+        piece.drag(FloatingSelection.EDGE + 0, mid[0], mid[1], mid[0] + 5, mid[1] + 7);
+        piece.release();
+        float[] afterEdge = piece.controlPoints();
+        for (int k = 0; k < 16; k++) {
+            boolean moved = k < 4;
+            float dx = moved ? 5 : 0, dy = moved ? 7 : 0;
+            check(Math.abs(afterEdge[2*k] - (beforeEdge[2*k] + dx)) < 1e-3
+                    && Math.abs(afterEdge[2*k+1] - (beforeEdge[2*k+1] + dy)) < 1e-3,
+                    "Distort edge 0 on warped piece updates control point " + k + " as expected");
+        }
+    }
+    private static void warpHandles() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        float[] knob = piece.knob(0, -1, 8, new float[]{0, 0, 120, 100});
+        piece.setMode(FloatingSelection.WARP);
+        float[] cp = piece.controlPoints();
+        for (int k = 0; k < 16; k++) {
+            check(piece.hit(cp[2*k], cp[2*k+1], knob, 3) == FloatingSelection.POINT + k,
+                    "WARP hit returns POINT+" + k + " on control point");
+        }
+        check(piece.hit(piece.centerX, piece.centerY, knob, 3) == FloatingSelection.PULL,
+                "WARP hit inside returns PULL");
+        check(piece.hit(knob[0], knob[1], knob, 3) == FloatingSelection.NONE,
+                "WARP hit at knob returns NONE");
+        check(piece.hit(5, 5, knob, 3) == FloatingSelection.NONE,
+                "WARP hit outside returns NONE");
+
+        // After warping, hit() still finds control points, interior PULL, and outside NONE.
+        piece.grab(FloatingSelection.PULL);
+        piece.drag(FloatingSelection.PULL, piece.centerX, piece.centerY, piece.centerX, piece.centerY + 12);
+        piece.release();
+        float[] warpedCp = piece.controlPoints();
+        for (int k = 0; k < 16; k++) {
+            check(piece.hit(warpedCp[2*k], warpedCp[2*k+1], null, 2.5f) == FloatingSelection.POINT + k,
+                    "Warped hit returns POINT+" + k);
+        }
+        float[] warpedCenter = piece.toPage(piece.width / 2f, piece.height / 2f);
+        check(piece.hit(warpedCenter[0], warpedCenter[1], null, 2.5f) == FloatingSelection.PULL,
+                "Warped hit at pulled centre returns PULL");
+        check(piece.hit(5, 5, null, 2.5f) == FloatingSelection.NONE,
+                "Warped hit outside returns NONE");
+    }
+    private static void poseOpsOnWarpedPiece() {
+        FloatingSelection piece = FloatingSelection.lift(square(), box(0, 0, 120, 100), 4);
+        piece.setMode(FloatingSelection.WARP);
+        piece.grab(FloatingSelection.PULL);
+        piece.drag(FloatingSelection.PULL, 40, 30, 40, 42);
+        piece.release();
+
+        piece.setMode(FloatingSelection.TRANSFORM);
+        float[] before = piece.corners();
+        piece.grab(FloatingSelection.MOVE);
+        piece.drag(FloatingSelection.MOVE, 40, 30, 65, 20);
+        piece.release();
+        float[] after = piece.corners();
+        for (int i = 0; i < 4; i++) {
+            check(Math.abs(after[2*i] - (before[2*i] + 25)) < 1e-3
+                    && Math.abs(after[2*i+1] - (before[2*i+1] - 10)) < 1e-3,
+                    "MOVE by (25, -10) shifts warped corner " + i + " by exactly that");
+        }
     }
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
 }

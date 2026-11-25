@@ -11,10 +11,16 @@ package io.github.mpdairy.monopaint;
  * center + R(angle) · diag(scaleX, scaleY) · (l − size/2). Negative scale mirrors along that axis.
  */
 final class FloatingSelection {
-    /** Interaction mode: affine pose transforms or local corner/edge distortion. */
-    static final int TRANSFORM = 0, DISTORT = 1;
-    /** What a pen-down at a point grabs: nothing, the piece itself, its turning knob, corner/edge in Transform or Distort. */
-    static final int NONE = -1, MOVE = 0, ROTATE = 1, SCALE = 2, STRETCH = 6, CORNER = 10, EDGE = 14;
+    /** Interaction mode: affine pose transforms, local corner/edge distortion, or bicubic Bézier warp. */
+    static final int TRANSFORM = 0, DISTORT = 1, WARP = 2;
+    /** What a pen-down at a point grabs: nothing, the piece itself, its turning knob, corner/edge in Transform or Distort, or Warp pull/control point. */
+    static final int NONE = -1, MOVE = 0, ROTATE = 1, SCALE = 2, STRETCH = 6, CORNER = 10, EDGE = 14, PULL = 18, POINT = 20;
+    /** Corner control-point indices in the 4×4 row-major patch, clockwise from top-left. */
+    private static final int[] PATCH_CORNERS = {0, 3, 15, 12};
+    /** Each corner and its two edge neighbours in the 4×4 patch (for Distort mode on a warped piece). */
+    private static final int[][] PATCH_CORNER_GROUP = {{0, 1, 4}, {3, 2, 7}, {15, 14, 11}, {12, 13, 8}};
+    /** The four control points along each edge of the 4×4 patch (top, right, bottom, left). */
+    private static final int[][] PATCH_EDGE = {{0, 1, 2, 3}, {3, 7, 11, 15}, {12, 13, 14, 15}, {0, 4, 8, 12}};
     /** Turns within this many degrees of a quarter turn settle on it. */
     private static final double SNAP = 4;
     final int width, height;
@@ -33,6 +39,12 @@ final class FloatingSelection {
     /** The four corners of {@code Local} in piece pixels (x, y pairs); identity when equal to the piece rectangle. */
     private final float[] local;
     private final float[] startLocal = new float[8];
+    /** Optional 4×4 row-major bicubic Bézier patch (32 floats, local piece pixels); null until first Warp drag. */
+    private float[] patch, startPatch;
+    /** Per-control-point weights for the active {@link #PULL} drag, computed once at grab time. */
+    private double[] pullWeights;
+    /** Reusable tessellator for bounds, outline and inverse lookup when warped. */
+    private WarpMap mesh;
     // The pose when the current drag began, the held point on the opposite corner/edge, and the stretch direction.
     private float startX, startY, startScaleX, startScaleY, anchorX, anchorY, axisX, axisY;
     /** A stretch's held point in local piece coordinates, so it stays put on a distorted piece too. */
@@ -54,9 +66,9 @@ final class FloatingSelection {
         local = new float[]{0, 0, width, 0, width, height, 0, height};
     }
 
-    /** Switches between {@link #TRANSFORM} and {@link #DISTORT} without changing the shape. */
+    /** Switches between {@link #TRANSFORM}, {@link #DISTORT} and {@link #WARP} without changing the shape. */
     void setMode(int mode) {
-        if (mode != TRANSFORM && mode != DISTORT) throw new IllegalArgumentException("Invalid mode: " + mode);
+        if (mode != TRANSFORM && mode != DISTORT && mode != WARP) throw new IllegalArgumentException("Invalid mode: " + mode);
         this.mode = mode;
     }
 
@@ -128,12 +140,53 @@ final class FloatingSelection {
 
     // Geometry
 
+    /** Whether this piece uses a bicubic Bézier warp patch. */
+    boolean warped() { return patch != null; }
+    /** The raw 4×4 row-major local control points (32 floats), or null when not warped. */
+    float[] patchPoints() { return patch; }
+    /** Evaluates a 4×4 row-major patch matching the current {@link #local} homography without activating warp. */
+    private float[] computePatchFromLocal() {
+        float[] pts = new float[32];
+        double[] m = localDistorted() ? localMatrix() : null;
+        for (int i = 0; i < 4; i++) {
+            double qy = i * height / 3.0;
+            for (int j = 0; j < 4; j++) {
+                double qx = j * width / 3.0;
+                int k = 2 * (4 * i + j);
+                if (m == null) {
+                    pts[k] = (float)qx;
+                    pts[k + 1] = (float)qy;
+                } else {
+                    double w = m[6] * qx + m[7] * qy + m[8];
+                    pts[k] = (float)((m[0] * qx + m[1] * qy + m[2]) / w);
+                    pts[k + 1] = (float)((m[3] * qx + m[4] * qy + m[5]) / w);
+                }
+            }
+        }
+        return pts;
+    }
+    /** Lazily creates {@link #patch} (and snapshots {@link #startPatch}) on the first Warp drag. */
+    private void ensurePatch() {
+        if (patch == null) {
+            patch = computePatchFromLocal();
+            if (startPatch == null) startPatch = new float[32];
+            System.arraycopy(patch, 0, startPatch, 0, 32);
+        }
+    }
+    private WarpMap mesh() {
+        if (mesh == null) mesh = new WarpMap();
+        return mesh;
+    }
     /** Whether {@link #local} differs from the piece's undistorted rectangle. */
-    private boolean distorted() {
+    private boolean localDistorted() {
         return local[0] != 0 || local[1] != 0
                 || local[2] != width || local[3] != 0
                 || local[4] != width || local[5] != height
                 || local[6] != 0 || local[7] != height;
+    }
+    /** Whether local distortion or a warp patch is active. */
+    private boolean distorted() {
+        return patch != null || localDistorted();
     }
     /** At its own size, undistorted and at a quarter turn, keeps the piece on whole pixels so placing it copies them exactly. */
     private void align() {
@@ -147,9 +200,16 @@ final class FloatingSelection {
 
     /** Applies the affine pose to local piece coordinates ({@code lx}, {@code ly}). */
     private float[] pose(double lx, double ly) {
+        float[] out = new float[2];
+        pose(lx, ly, out, 0);
+        return out;
+    }
+    /** Writes {@code Pose(lx, ly)} into {@code out[offset..offset+1]}. */
+    private void pose(double lx, double ly, float[] out, int offset) {
         double c = Math.cos(angle), s = Math.sin(angle);
         double dx = (lx - width / 2.0) * scaleX, dy = (ly - height / 2.0) * scaleY;
-        return new float[]{(float)(centerX + c * dx - s * dy), (float)(centerY + s * dx + c * dy)};
+        out[offset] = (float)(centerX + c * dx - s * dy);
+        out[offset + 1] = (float)(centerY + s * dx + c * dy);
     }
     /** Linear part of the inverse affine pose applied to a page-space delta. */
     private double[] poseInverseDelta(double dx, double dy) {
@@ -225,8 +285,13 @@ final class FloatingSelection {
     }
 
     /** The page point showing piece point ({@code x}, {@code y}). */
-    private float[] toPage(float x, float y) {
-        if (!distorted()) return pose(x, y);
+    float[] toPage(float x, float y) {
+        if (patch != null) {
+            double[] l = new double[2];
+            WarpMap.evalLocal(patch, x / (double)width, y / (double)height, l);
+            return pose(l[0], l[1]);
+        }
+        if (!localDistorted()) return pose(x, y);
         double[] m = localMatrix();
         double w = m[6] * x + m[7] * y + m[8];
         return pose((m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w);
@@ -234,14 +299,39 @@ final class FloatingSelection {
     /** The four corners on the page, from the piece's top left around its edges: x, y pairs. */
     float[] corners() {
         float[] corners = new float[8];
-        for (int i = 0; i < 4; i++) {
-            float[] at = pose(local[2*i], local[2*i+1]);
-            corners[2*i] = at[0]; corners[2*i+1] = at[1];
+        if (patch != null) {
+            for (int i = 0; i < 4; i++) {
+                int k = PATCH_CORNERS[i];
+                pose(patch[2*k], patch[2*k+1], corners, 2*i);
+            }
+            return corners;
         }
+        for (int i = 0; i < 4; i++) pose(local[2*i], local[2*i+1], corners, 2*i);
         return corners;
     }
+    /** The 16 bicubic control points in page coordinates (4×4 row-major, x, y pairs). */
+    float[] controlPoints() {
+        float[] src = patch != null ? patch : computePatchFromLocal();
+        float[] out = new float[32];
+        for (int k = 0; k < 16; k++) pose(src[2*k], src[2*k+1], out, 2*k);
+        return out;
+    }
+    /** Closed outline polyline in page coordinates: 4N points when warped, otherwise the 4 corners. */
+    float[] outline() {
+        return patch != null ? mesh().boundary(this) : corners();
+    }
     /** The middles of the four edges on the page, edge {@code i} between corners i and i + 1: x, y pairs. */
-    float[] edgeMiddles() { return edgeMiddles(corners()); }
+    float[] edgeMiddles() {
+        if (patch == null) return edgeMiddles(corners());
+        float[] middles = new float[8];
+        double[] l = new double[2];
+        double[][] uv = {{0.5, 0}, {1, 0.5}, {0.5, 1}, {0, 0.5}};
+        for (int i = 0; i < 4; i++) {
+            WarpMap.evalLocal(patch, uv[i][0], uv[i][1], l);
+            pose(l[0], l[1], middles, 2*i);
+        }
+        return middles;
+    }
     private static float[] edgeMiddles(float[] c) {
         float[] middles = new float[8];
         for (int i = 0; i < 4; i++) {
@@ -256,14 +346,21 @@ final class FloatingSelection {
      * and y' = y + ½. Undistorted, g = h = 0 and i = 1.
      */
     float[] inverse() {
+        if (patch != null) return new float[]{0, 0, -1, 0, 0, -1, 0, 0, 1};
         double[] pInv = poseInverseMatrix();
-        if (!distorted()) return toFloat(pInv);
+        if (!localDistorted()) return toFloat(pInv);
         double[] lInv = invert3x3(localMatrix());
         if (lInv == null) return new float[]{0, 0, -1, 0, 0, -1, 0, 0, 1};
         return toFloat(mul3x3(lInv, pInv));
     }
     /** The page pixels the piece covers now: left, top, right, bottom, clipped to the page; empty when off it. */
     int[] bounds() {
+        if (patch != null) {
+            WarpMap m = mesh();
+            m.tessellate(this);
+            return new int[]{Math.max(0, (int)Math.floor(m.minX) - 1), Math.max(0, (int)Math.floor(m.minY) - 1),
+                    Math.min(pageWidth, (int)Math.ceil(m.maxX) + 1), Math.min(pageHeight, (int)Math.ceil(m.maxY) + 1)};
+        }
         float[] c = corners();
         float minX = Math.min(Math.min(c[0], c[2]), Math.min(c[4], c[6])), maxX = Math.max(Math.max(c[0], c[2]), Math.max(c[4], c[6]));
         float minY = Math.min(Math.min(c[1], c[3]), Math.min(c[5], c[7])), maxY = Math.max(Math.max(c[1], c[3]), Math.max(c[5], c[7]));
@@ -299,8 +396,8 @@ final class FloatingSelection {
     }
     private float[] knobAt(float[] c, int edge, float distance, boolean inside) {
         float[] normal = outward(c, edge);
-        int next = (edge + 1) % 4;
-        float midX = (c[2*edge] + c[2*next]) / 2, midY = (c[2*edge+1] + c[2*next+1]) / 2;
+        float[] middles = edgeMiddles();
+        float midX = middles[2*edge], midY = middles[2*edge+1];
         // Inside, stay within the piece's nearer half.
         if (inside) distance = -Math.min(distance, (edge % 2 == 0 ? height * Math.abs(scaleY) : width * Math.abs(scaleX)) / 2);
         return new float[]{midX + normal[0] * distance, midY + normal[1] * distance, midX, midY, edge, inside ? 1 : 0};
@@ -315,18 +412,24 @@ final class FloatingSelection {
     }
 
     /**
-     * What a pen-down at ({@code x}, {@code y}) grabs, given the knob (or null in Distort mode)
+     * What a pen-down at ({@code x}, {@code y}) grabs, given the knob (or null outside Transform mode)
      * and how far, in page pixels, a handle reaches.
      */
     int hit(float x, float y, float[] knob, float reach) {
         if (mode == TRANSFORM && knob != null && Math.hypot(x - knob[0], y - knob[1]) <= reach) return ROTATE;
         float[] q = piecePoint(x, y);
         boolean inside = q[0] >= 0 && q[1] >= 0 && q[0] <= width && q[1] <= height;
+        if (mode == WARP) {
+            int point = nearest(x, y, controlPoints(), reach, POINT);
+            if (point != NONE) return point;
+            return inside ? PULL : NONE;
+        }
         float[] c = corners();
+        float[] middles = edgeMiddles();
         if (mode == DISTORT) {
             int corner = nearest(x, y, c, reach, CORNER);
             if (corner != NONE) return corner;
-            int edge = nearest(x, y, edgeMiddles(c), reach, EDGE);
+            int edge = nearest(x, y, middles, reach, EDGE);
             if (edge != NONE) return edge;
             return inside ? MOVE : NONE;
         }
@@ -334,22 +437,23 @@ final class FloatingSelection {
         if (inside && Math.min(width * Math.abs(scaleX), height * Math.abs(scaleY)) < 3 * reach) return MOVE;
         int corner = nearest(x, y, c, reach, SCALE);
         if (corner != NONE) return corner;
-        int edge = nearest(x, y, edgeMiddles(c), reach, STRETCH);
+        int edge = nearest(x, y, middles, reach, STRETCH);
         if (edge != NONE) return edge;
         return inside ? MOVE : NONE;
     }
     private static int nearest(float x, float y, float[] points, float reach, int base) {
         int found = NONE; double best = reach;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; 2 * i + 1 < points.length; i++) {
             double distance = Math.hypot(x - points[2*i], y - points[2*i+1]);
             if (distance <= best) { best = distance; found = base + i; }
         }
         return found;
     }
-    /** The piece pixel coordinate shown at page point ({@code x}, {@code y}), or NaN beyond the vanishing line. */
+    /** The piece pixel coordinate shown at page point ({@code x}, {@code y}), or NaN outside / beyond the vanishing line. */
     float[] piecePoint(float x, float y) {
+        if (patch != null) return mesh().inverseLookup(this, x, y);
         double[] l = poseInverse(x, y);
-        if (!distorted()) return new float[]{(float)l[0], (float)l[1]};
+        if (!localDistorted()) return new float[]{(float)l[0], (float)l[1]};
         double[] inv = invert3x3(localMatrix());
         if (inv == null) return new float[]{Float.NaN, Float.NaN};
         double w = inv[6] * l[0] + inv[7] * l[1] + inv[8];
@@ -370,13 +474,18 @@ final class FloatingSelection {
     void grab(int handle) {
         startX = centerX; startY = centerY; startScaleX = scaleX; startScaleY = scaleY; startAngle = angle;
         System.arraycopy(local, 0, startLocal, 0, 8);
+        if (patch != null) {
+            if (startPatch == null) startPatch = new float[32];
+            System.arraycopy(patch, 0, startPatch, 0, 32);
+        }
+        pullWeights = null;
         turning = handle == ROTATE;
         if (handle >= SCALE && handle < STRETCH) {
             float[] c = corners(); int opposite = (handle - SCALE + 2) % 4;
             anchorX = c[2*opposite]; anchorY = c[2*opposite+1];
         } else if (handle >= STRETCH && handle < CORNER) {
             float[] c = corners(); int edge = handle - STRETCH, opposite = (edge + 2) % 4;
-            float[] middles = edgeMiddles(c);
+            float[] middles = edgeMiddles();
             anchorX = middles[2*opposite]; anchorY = middles[2*opposite+1];
             double[] held = poseInverse(anchorX, anchorY);
             anchorLocalX = held[0]; anchorLocalY = held[1];
@@ -421,19 +530,61 @@ final class FloatingSelection {
             // lies on the stretch axis and this matches scaling the center about it.
             double cos = Math.cos(angle), sin = Math.sin(angle);
             double hx = (anchorLocalX - width / 2.0) * scaleX, hy = (anchorLocalY - height / 2.0) * scaleY;
-            centerX = (float)(anchorX - (cos * hx - sin * hy)); centerY = (float)(anchorY - (sin * hx + cos * hy));        } else if (handle >= CORNER) {
+            centerX = (float)(anchorX - (cos * hx - sin * hy)); centerY = (float)(anchorY - (sin * hx + cos * hy));
+        } else if (handle >= CORNER && handle < PULL) {
             boolean edge = handle >= EDGE;
             int i = handle - (edge ? EDGE : CORNER);
             double[] d = poseInverseDelta(x - fromX, y - fromY);
-            float[] next = startLocal.clone();
-            shiftLocal(next, i, d);
-            if (edge) shiftLocal(next, (i + 1) % 4, d);
-            if (quadValid(next)) System.arraycopy(next, 0, local, 0, 8);
+            if (patch != null) {
+                System.arraycopy(startPatch, 0, patch, 0, 32);
+                int[] group = edge ? PATCH_EDGE[i] : PATCH_CORNER_GROUP[i];
+                for (int k : group) shiftPoint(patch, k, d);
+            } else {
+                float[] next = startLocal.clone();
+                shiftPoint(next, i, d);
+                if (edge) shiftPoint(next, (i + 1) % 4, d);
+                if (quadValid(next)) System.arraycopy(next, 0, local, 0, 8);
+            }
+        } else if (handle == PULL) {
+            ensurePatch();
+            if (pullWeights == null) {
+                float[] q = piecePoint(fromX, fromY);
+                if (!Float.isFinite(q[0]) || !Float.isFinite(q[1])) return;
+                double u = Math.max(0, Math.min(1, q[0] / width));
+                double v = Math.max(0, Math.min(1, q[1] / height));
+                pullWeights = computePullWeights(u, v);
+            }
+            double[] d = poseInverseDelta(x - fromX, y - fromY);
+            for (int k = 0; k < 16; k++) {
+                double w = pullWeights[k];
+                patch[2*k] = (float)(startPatch[2*k] + d[0] * w);
+                patch[2*k+1] = (float)(startPatch[2*k+1] + d[1] * w);
+            }
+        } else if (handle >= POINT && handle < POINT + 16) {
+            ensurePatch();
+            int k = handle - POINT;
+            double[] d = poseInverseDelta(x - fromX, y - fromY);
+            System.arraycopy(startPatch, 0, patch, 0, 32);
+            shiftPoint(patch, k, d);
         }
     }
-    private static void shiftLocal(float[] quad, int corner, double[] d) {
-        quad[2*corner] = (float)(quad[2*corner] + d[0]);
-        quad[2*corner+1] = (float)(quad[2*corner+1] + d[1]);
+    private static double[] computePullWeights(double u, double v) {
+        double[] bu = new double[4], bv = new double[4];
+        WarpMap.bernstein(u, bu);
+        WarpMap.bernstein(v, bv);
+        double[] w = new double[16];
+        double sumSq = 0;
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+            double b = bv[i] * bu[j];
+            w[4*i + j] = b;
+            sumSq += b * b;
+        }
+        for (int k = 0; k < 16; k++) w[k] /= sumSq;
+        return w;
+    }
+    private static void shiftPoint(float[] points, int index, double[] d) {
+        points[2*index] = (float)(points[2*index] + d[0]);
+        points[2*index+1] = (float)(points[2*index+1] + d[1]);
     }
     /** Ends a drag. */
     void release() {
@@ -453,13 +604,19 @@ final class FloatingSelection {
      * The piece's tone and coverage at page pixel ({@code x}, {@code y}) as placed, blended
      * between its nearest pixels, packed as tone << 8 | coverage; 0 where it leaves the page bare.
      */
-    private int sample(float[] m, int x, int y) {
+    private int sample(float[] m, WarpMap map, int x, int y) {
+        if (map != null) {
+            int i = 2 * ((y - map.top) * map.width + (x - map.left));
+            return samplePiece(map.coords[i], map.coords[i + 1]);
+        }
         float px = x + .5f, py = y + .5f;
         float w = m[6] * px + m[7] * py + m[8];
         if (w <= 0) return 0;
-        float ux = (m[0] * px + m[1] * py + m[2]) / w, uy = (m[3] * px + m[4] * py + m[5]) / w;
+        return samplePiece((m[0] * px + m[1] * py + m[2]) / w, (m[3] * px + m[4] * py + m[5]) / w);
+    }
+    private int samplePiece(float ux, float uy) {
         // The piece ends sharply at its edges, as the preview shows it; within them, blend neighbours.
-        if (ux < 0 || uy < 0 || ux >= width || uy >= height) return 0;
+        if (!(ux >= 0 && uy >= 0 && ux < width && uy < height)) return 0;
         float qx = ux - .5f, qy = uy - .5f;
         int x0 = (int)Math.floor(qx), y0 = (int)Math.floor(qy);
         int sx0 = Math.max(0, Math.min(width - 1, x0)), sx1 = Math.max(0, Math.min(width - 1, x0 + 1));
@@ -476,13 +633,18 @@ final class FloatingSelection {
      */
     boolean place(ToneDocument document) {
         if (unmoved()) return false;
-        float[] m = inverse();
         int[] area = bounds();
+        float[] m = patch == null ? inverse() : null;
+        WarpMap map = null;
+        if (patch != null && area[2] > area[0] && area[3] > area[1]) {
+            map = new WarpMap();
+            map.rasterize(this, area[0], area[1], area[2] - area[0], area[3] - area[1]);
+        }
         if (newLayer) {
             byte[] layerTones = new byte[document.width * document.height], layerAlpha = new byte[layerTones.length];
             java.util.Arrays.fill(layerTones, (byte)255);
             for (int y = area[1]; y < area[3]; y++) for (int x = area[0]; x < area[2]; x++) {
-                int pixel = sample(m, x, y);
+                int pixel = sample(m, map, x, y);
                 if (pixel == 0) continue;
                 layerTones[y * document.width + x] = (byte)(pixel >>> 8); layerAlpha[y * document.width + x] = (byte)pixel;
             }
@@ -493,7 +655,7 @@ final class FloatingSelection {
         if (lifted) for (int row = 0; row < height; row++) for (int col = 0; col < width; col++)
             if (alpha[row * width + col] != 0) document.paintTone(cutX + col, cutY + row, 255, 0);
         for (int y = area[1]; y < area[3]; y++) for (int x = area[0]; x < area[2]; x++) {
-            int pixel = sample(m, x, y);
+            int pixel = sample(m, map, x, y);
             if (pixel != 0) document.overTone(x, y, pixel >>> 8, pixel & 255);
         }
         return document.finish();

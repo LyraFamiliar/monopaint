@@ -9,16 +9,20 @@ import android.graphics.Rect;
  */
 final class SelectionPreview {
     static { System.loadLibrary("monopaint_display"); }
+    private static final float[] NO_MAP = new float[0];
     private static native void nativeApply(Bitmap display, byte[][] tones, byte[][] alpha, int[] visible, int target,
             boolean newLayer, byte[] pieceTones, byte[] pieceAlpha, int pieceWidth, int pieceHeight,
-            boolean lifted, int cutX, int cutY, float[] inverse, int[] dots, boolean logical,
-            int left, int top, int right, int bottom);
+            boolean lifted, int cutX, int cutY, float[] inverse,
+            float[] map, int mapLeft, int mapTop, int mapWidth, int mapHeight,
+            int[] dots, boolean logical, int left, int top, int right, int bottom);
     final FloatingSelection piece;
     private final byte[][] tones, alpha;
     private final int[] visible;
     private final int target;
     /** Page pixels the piece covered in the last frame. */
     private final Rect shown = new Rect();
+    /** Reusable coordinate map for warped pieces. */
+    private WarpMap warpMap;
 
     SelectionPreview(ToneDocument document, FloatingSelection piece) {
         this.piece = piece;
@@ -47,9 +51,22 @@ final class SelectionPreview {
     Rect showAll(Bitmap display, boolean logical) { return draw(area(), rect(piece.bounds()), display, logical); }
     private Rect draw(Rect dirty, Rect now, Bitmap display, boolean logical) {
         if (!dirty.intersect(0, 0, display.getWidth(), display.getHeight())) return new Rect();
+        float[] map = NO_MAP;
+        int mapLeft = 0, mapTop = 0, mapWidth = 0, mapHeight = 0;
+        if (piece.warped()) {
+            Rect clipped = new Rect(now);
+            if (clipped.intersect(dirty)) {
+                if (warpMap == null) warpMap = new WarpMap();
+                warpMap.rasterize(piece, clipped.left, clipped.top, clipped.width(), clipped.height());
+                map = warpMap.coords;
+                mapLeft = warpMap.left; mapTop = warpMap.top;
+                mapWidth = warpMap.width; mapHeight = warpMap.height;
+            }
+        }
         nativeApply(display, tones, alpha, visible, target, piece.newLayer, piece.tones, piece.alpha, piece.width, piece.height,
-                piece.lifted, piece.cutX, piece.cutY, piece.inverse(), ViewportBitmap.DOTS, logical,
-                dirty.left, dirty.top, dirty.right, dirty.bottom);
+                piece.lifted, piece.cutX, piece.cutY, piece.inverse(),
+                map, mapLeft, mapTop, mapWidth, mapHeight,
+                ViewportBitmap.DOTS, logical, dirty.left, dirty.top, dirty.right, dirty.bottom);
         shown.set(now);
         return dirty;
     }

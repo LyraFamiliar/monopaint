@@ -19,10 +19,13 @@ with each change; when cutting a release, turn that section into
   side to stretch or squash the piece just that way while holding the opposite
   side still, or drag a side dot (or corner dot) past the opposite side to flip
   it.
-- **Distort and skew Lasso pieces**: a **Transform / Distort** bar appears at
+- **Distort and skew Lasso pieces**: a **Transform / Distort / Warp** bar appears at
   the top of the canvas while a piece is picked up. Switch to **Distort** to
   drag any corner on its own for perspective, or drag a side dot to slant the
   piece.
+- **Warp Lasso pieces**: switch to **Warp** (the third button on the bar) to
+  drag anywhere on the piece and bend it like a sheet of rubber, or drag any of
+  the grid dots to shape it.
 - **Import image…** in the menu brings a PNG or JPEG onto the page, on the
   current layer or a new one (it remembers which you picked last), fitted to the page or at its own size, and turned
   a quarter at a time with **Turn left** and **Turn right**, with a preview of

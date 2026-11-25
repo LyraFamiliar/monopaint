@@ -864,9 +864,33 @@ final class DrawingPad extends View {
         if (!dirty.isEmpty()) queue(dirty);
         drawSelectionFrame();
     }
-    /** Outlines the piece, with dots on its corners and sides, plus a turning knob in Transform mode. */
+    /** Outlines the piece, with dots on its handles (or the 4×4 control net in Warp mode), plus a turning knob in Transform mode. */
     private void drawSelectionFrame() {
         if (selection == null || presented() == null) return;
+        float[] rawOutline = selection.outline();
+        float[] outline = presentedPoints(rawOutline, rawOutline.length / 2);
+        if (selection.mode == FloatingSelection.WARP) {
+            float[] control = presentedPoints(selection.controlPoints(), 16);
+            guide.add(presented(), outline, outline.length / 2, true, null, 0, this::queueView);
+            float[] line = new float[8];
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 4; j++) { int k = 4 * i + j; line[2*j] = control[2*k]; line[2*j+1] = control[2*k+1]; }
+                guide.add(presented(), line, 4, false, null, 0, this::queueView);
+            }
+            for (int j = 0; j < 4; j++) {
+                for (int i = 0; i < 4; i++) { int k = 4 * i + j; line[2*i] = control[2*k]; line[2*i+1] = control[2*k+1]; }
+                guide.add(presented(), line, 4, false, null, 0, this::queueView);
+            }
+            float[] cornerDots = new float[8], otherDots = new float[24];
+            int ci = 0, oi = 0;
+            for (int k = 0; k < 16; k++) {
+                if (k == 0 || k == 3 || k == 12 || k == 15) { cornerDots[ci++] = control[2*k]; cornerDots[ci++] = control[2*k+1]; }
+                else { otherDots[oi++] = control[2*k]; otherDots[oi++] = control[2*k+1]; }
+            }
+            guide.add(presented(), null, 0, false, otherDots, dp(4), this::queueView);
+            guide.add(presented(), null, 0, false, cornerDots, dp(5), this::queueView);
+            return;
+        }
         float[] corners = presentedPoints(selection.corners(), 4);
         float[] edges = presentedPoints(selection.edgeMiddles(), 4);
         float[] stem = null;
@@ -875,7 +899,7 @@ final class DrawingPad extends View {
             stem = presentedPoints(new float[]{knob[2], knob[3], knob[0], knob[1]}, 2);
         }
         // Lines first, then dots over them: the smaller side dots, the corners, the knob.
-        guide.add(presented(), corners, 4, true, null, 0, this::queueView);
+        guide.add(presented(), outline, outline.length / 2, true, null, 0, this::queueView);
         if (stem != null) guide.add(presented(), stem, 2, false, null, 0, this::queueView);
         guide.add(presented(), null, 0, false, edges, dp(4), this::queueView);
         guide.add(presented(), null, 0, false, corners, dp(5), this::queueView);
