@@ -6,6 +6,9 @@ with each change; when cutting a release, turn that section into
 
 ## 0.99 (Unreleased)
 
+- New **Liquify** tool: push and nudge your drawing like it's made of putty.
+  Drag to move what's under the brush on the current layer, with **Size** and
+  **Strength** settings; each stroke is one Undo step.
 - New **Lasso** tool: draw a loop around part of the current layer to pick it
   up, then drag inside it to move it, drag a corner dot to resize it, or drag
   the round knob to turn it. The knob turns with the piece, so it stays under

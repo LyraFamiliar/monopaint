@@ -28,12 +28,15 @@ final class Footprint extends View {
         float y = getHeight()/2f - Ui.dp(getContext(), 10);
         ToolSettings s = settings.get();
         boolean pencil = s.tool == ToolSettings.Tool.PENCIL;
+        // Footprints show at canvas size, unless one is too big for its half of the preview (Liquify's can be).
+        float room = Math.min(getWidth() * .38f, 2 * (y - Ui.dp(getContext(), 4)));
+        float fit = s.maximum > room && room > 0 ? room / s.maximum : 1;
         for (int i = 0; i < 2; i++) {
             float x = getWidth()*(i == 0 ? .3f : .7f);
             int diameter = i == 0 ? s.minimum : pencil && !s.tilt ? s.tip : s.maximum;
-            float r = diameter/2f;
+            float r = diameter/2f*fit;
             boolean softRound = s.tool == ToolSettings.Tool.ERASER || s.tool == ToolSettings.Tool.AIRBRUSH;
-            if (s.tool == ToolSettings.Tool.SOFTEN || (softRound && s.softness > 0)) {
+            if (s.tool == ToolSettings.Tool.SOFTEN || s.tool == ToolSettings.Tool.LIQUIFY || (softRound && s.softness > 0)) {
                 float edge = softRound ? s.softness/100f : 1;
                 paint.setShader(new RadialGradient(x, y, r, new int[]{Color.BLACK, Color.BLACK, Color.WHITE},
                         new float[]{0, Math.max(.001f, 1-edge), 1}, Shader.TileMode.CLAMP));

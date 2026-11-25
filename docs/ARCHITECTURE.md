@@ -45,7 +45,9 @@ To add a tool:
    sliders, checkboxes and hints. Each control reads and edits the current
    `ToolSettings`; the panel saves and refreshes the toolbar automatically.
 4. Return its `DrawingStroke` from `ToolStrokes.create`. A stroke receives pen samples
-   in page coordinates and edits the `ToneDocument`; `finish()` commits one undo step.
+   in page coordinates and edits the `ToneDocument`; `finish()` commits one undo step
+   (for example, `LiquifyStroke` accumulates a coarse displacement field per stroke and
+   resamples stroke-start pixels directly).
 5. Add it to `Toolbar.TOOLS` to show it in the side toolbar.
 
 Fill, Shapes and Lasso are drag-and-release gestures rather than strokes. `DrawingPad` runs

@@ -251,12 +251,30 @@ final class ToneDocument {
     int layerTone(int x, int y) { Layer layer=layers.get(active); int i=y*width+x; return onWhite(layer.tones[i]&255,layer.alpha[i]&255); }
     private static int onWhite(int tone,int alpha) { return (tone*alpha+255*(255-alpha)+127)/255; }
     int strokeBaseTone(int x, int y) {
-        int key=(y/TILE)*columns()+x/TILE;
-        if(!captured[key]) return tone(x,y);
-        int tileWidth=Math.min(TILE,width-(x/TILE)*TILE);
-        int offset=(y%TILE)*tileWidth+x%TILE;
-        byte[] tile=baseTile(key);
-        return onWhite(tile[offset]&255,tile[tile.length/2+offset]&255);
+        int pixel = strokeBasePixel(x, y);
+        return onWhite(pixel >>> 8, pixel & 255);
+    }
+    /** The bound layer's pixel as this gesture found it: raw tone in the high byte, coverage in the low byte. */
+    int strokeBasePixel(int x, int y) {
+        int key = (y / TILE) * columns() + x / TILE, i = y * width + x;
+        if (!captured[key]) return (tones[i] & 255) << 8 | (alpha[i] & 255);
+        byte[] tile = baseTile(key);
+        int w = Math.min(TILE, width - (x / TILE) * TILE), offset = (y % TILE) * w + x % TILE;
+        return (tile[offset] & 255) << 8 | (tile[tile.length / 2 + offset] & 255);
+    }
+    /**
+     * Premultiplied bilinear blend of four packed {@code tone << 8 | alpha} pixels at fractional
+     * offsets ({@code fx}, {@code fy}); returns 0 when the blended coverage rounds to transparent.
+     */
+    static int blendBilinear(int p00, int p10, int p01, int p11, float fx, float fy) {
+        float w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+        int a00 = p00 & 255, a10 = p10 & 255, a01 = p01 & 255, a11 = p11 & 255;
+        float coverage = a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11;
+        int a = Math.round(coverage);
+        if (a == 0) return 0;
+        float pigment = (p00 >>> 8) * a00 * w00 + (p10 >>> 8) * a10 * w10
+                + (p01 >>> 8) * a01 * w01 + (p11 >>> 8) * a11 * w11;
+        return Math.max(0, Math.min(255, Math.round(pigment / coverage))) << 8 | Math.min(255, a);
     }
     byte[] snapshot() {
         byte[] result=new byte[width*height];
@@ -330,13 +348,6 @@ final class ToneDocument {
         int base=strokeBaseTone(x,y),result=Math.round(base+(gray-base)*strength);
         int coverage=Math.max(edge==255?opacity(x,y):strokeBasePixel(x,y)&255,Math.max(Math.round(255*strength),255-result));
         cover(x,y,rawTone(result,coverage),coverage,edge);
-    }
-    /** The active layer's pixel as this gesture found it: raw tone in the high byte, coverage in the low byte. */
-    private int strokeBasePixel(int x,int y) {
-        int key=(y/TILE)*columns()+x/TILE,i=y*width+x;
-        if(!captured[key]) return (tones[i]&255)<<8|(alpha[i]&255);
-        byte[] tile=baseTile(key); int w=Math.min(TILE,width-(x/TILE)*TILE),offset=(y%TILE)*w+x%TILE;
-        return (tile[offset]&255)<<8|(tile[tile.length/2+offset]&255);
     }
     /** A captured tile as this gesture found it. Captures never change mid-gesture, so the last one is kept at hand. */
     private byte[] baseTile(int key) {

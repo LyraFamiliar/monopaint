@@ -320,18 +320,12 @@ final class FloatingSelection {
         if (ux < 0 || uy < 0 || ux >= width || uy >= height) return 0;
         float qx = ux - .5f, qy = uy - .5f;
         int x0 = (int)Math.floor(qx), y0 = (int)Math.floor(qy);
-        float fx = qx - x0, fy = qy - y0, pigment = 0, coverage = 0;
-        for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
-            int sx = Math.max(0, Math.min(width - 1, x0 + dx)), sy = Math.max(0, Math.min(height - 1, y0 + dy));
-            float weight = (dx == 0 ? 1 - fx : fx) * (dy == 0 ? 1 - fy : fy);
-            if (weight == 0) continue;
-            int i = sy * width + sx, a = alpha[i] & 255;
-            coverage += a * weight; pigment += (tones[i] & 255) * a * weight;
-        }
-        int a = Math.round(coverage);
-        if (a == 0) return 0;
-        return Math.max(0, Math.min(255, Math.round(pigment / coverage))) << 8 | Math.min(255, a);
+        int sx0 = Math.max(0, Math.min(width - 1, x0)), sx1 = Math.max(0, Math.min(width - 1, x0 + 1));
+        int sy0 = Math.max(0, Math.min(height - 1, y0)), sy1 = Math.max(0, Math.min(height - 1, y0 + 1));
+        return ToneDocument.blendBilinear(rawPixel(sx0, sy0), rawPixel(sx1, sy0), rawPixel(sx0, sy1), rawPixel(sx1, sy1),
+                qx - x0, qy - y0);
     }
+    private int rawPixel(int x, int y) { int i = y * width + x; return (tones[i] & 255) << 8 | (alpha[i] & 255); }
 
     /**
      * Lays the piece on the page as one undo step: onto the active layer, which first loses

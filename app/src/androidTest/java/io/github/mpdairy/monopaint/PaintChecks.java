@@ -790,7 +790,7 @@ final class PaintChecks {
                     }
                     if(tool==ToolSettings.Tool.PENCIL) ((android.widget.SeekBar)findDescription(root,"Hardness")).setProgress(81);
                     if(tool==ToolSettings.Tool.ERASER) ((android.widget.SeekBar)findDescription(root,"Softness")).setProgress(27);
-                    if(tool==ToolSettings.Tool.SOFTEN) ((android.widget.SeekBar)findDescription(root,"Strength")).setProgress(62);
+                    if(tool==ToolSettings.Tool.SOFTEN || tool==ToolSettings.Tool.LIQUIFY) ((android.widget.SeekBar)findDescription(root,"Strength")).setProgress(62);
                     check(tools.activeId().equals(id)&&tools.presets().get(0).settings.equals(tools.current()),"Slider edits update the selected custom tool");
                     dialog.getContentView().findViewWithTag("close").performClick();
                 } finally {dialog.dismiss();}

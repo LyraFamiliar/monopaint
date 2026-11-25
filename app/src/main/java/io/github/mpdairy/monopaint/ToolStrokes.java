@@ -25,6 +25,8 @@ final class ToolStrokes {
                 return new ToolStroke(document, settings, gray, erasing);
             case PENCIL: case SOFTEN: case AIRBRUSH:
                 return new ToolStroke(document, settings, gray, erasing);
+            case LIQUIFY:
+                return new LiquifyStroke(document, settings);
             default:
                 throw new IllegalArgumentException(settings.tool + " is not a stroke tool");
         }

@@ -22,6 +22,7 @@ final class ToolControls {
             case PENCIL: pencil(form, textSize); break;
             case ERASER: eraser(form, textSize); break;
             case SOFTEN: soften(form, textSize); break;
+            case LIQUIFY: liquify(form, textSize); break;
             case AIRBRUSH: airbrush(form, textSize); break;
             case BRUSH_PEN: case WET_BRUSH_PEN: brushPen(form, current, textSize); break;
             case FILL: fill(form, current); break;
@@ -79,6 +80,13 @@ final class ToolControls {
         sizes(form, "diameter", 128);
         form.percent("Strength", s -> s.strength, ToolSettings::strength);
         form.hint("Pull shading in the direction you rub. Lower strength blends gently; repeat passes to build it up.");
+    }
+
+    private static void liquify(SettingsForm form, float textSize) {
+        form.footprint(84, textSize);
+        sizes(form, "diameter", ToolSettings.MAX_LIQUIFY);
+        form.percent("Strength", s -> s.strength, ToolSettings::strength);
+        form.hint("Push and nudge paint in the direction you drag.");
     }
 
     private static void brushPen(SettingsForm form, ToolSettings current, float textSize) {

@@ -17,6 +17,9 @@ final class ToolSettings {
     static final int MAX_FLAT_WIDTH = 256;
     static final int MAX_FLAT_HEIGHT = 20;
     static int sizeLimit(Head head) { return head == Head.FLAT ? MAX_FLAT_WIDTH : 128; }
+    /** Liquify reshapes whole forms, so its brush reaches well beyond the painting tools'. */
+    static final int MAX_LIQUIFY = 400;
+    static int sizeLimit(Tool tool, Head head) { return tool == Tool.LIQUIFY ? MAX_LIQUIFY : sizeLimit(head); }
 
     /**
      * Every drawing tool. To add one:
@@ -41,7 +44,8 @@ final class ToolSettings {
         SHAPES("Shapes", Kind.COLORED),
         BRUSH_PEN("Brush pen", Kind.WATER),
         WET_BRUSH_PEN("Wet brush pen", Kind.FLOWING_WATER),
-        LASSO("Lasso", Kind.SELECTION);
+        LASSO("Lasso", Kind.SELECTION),
+        LIQUIFY("Liquify", Kind.COLORLESS);
 
         final String label;
         /** Brushes share brush heads, wet canvas and transparent paint; they display as one Brush tool. */
@@ -117,7 +121,7 @@ final class ToolSettings {
         this.clearWater = clearWater && tool.flowing; this.coverage = coverage;
         if (coverage < 0 || coverage > 100) throw new IllegalArgumentException("Invalid coverage");
         if (gradient == null || headThickness < 0 || headThickness > 100 || bristles < 0 || bristles > 100 || tool == null || head == null || angle < 0 || angle > 180
-                || (!tool.brush && head != Head.ROUND) || maximum < 2 || maximum > sizeLimit(head) || minimum < 1 || minimum > maximum || tip < 1 || tip > sizeLimit(head)
+                || (!tool.brush && head != Head.ROUND) || maximum < 2 || maximum > sizeLimit(tool, head) || minimum < 1 || minimum > maximum || tip < 1 || tip > sizeLimit(tool, head)
                 || softness < 0 || softness > 100 || hardness < 0 || hardness > 100 || tolerance < 0 || tolerance > 100 || carry < 0 || carry > 100 || paintLoad < 1 || paintLoad > UNLIMITED_PAINT || loadingSpeed < 0 || loadingSpeed > 100 || minimumLoad < 0 || minimumLoad > 100 || strength < 0 || strength > 100 || pressureResponse < 0 || pressureResponse > 100)
             throw new IllegalArgumentException("Invalid tool settings");
         this.gradient=gradient; this.tool = tool; this.head = head; this.angle = angle; this.bristles = bristles; this.headThickness = headThickness; this.minimum = minimum; this.maximum = maximum; this.tip = Math.max(minimum,Math.min(tip,maximum));
@@ -143,6 +147,7 @@ final class ToolSettings {
             case PENCIL: return settings.size(81);
             case ERASER: return settings.minimum(35);
             case SOFTEN: return settings.size(57).minimum(19);
+            case LIQUIFY: return settings.size(160).minimum(80).strength(50);
             case AIRBRUSH: return settings.size(86).minimum(36).softness(88).strength(18);
             case FILL: return settings.gradient(Gradient.FLAT);
             default: return settings;
@@ -249,7 +254,7 @@ final class ToolSettings {
         return label();
     }
     /** The measured .05–.45 pen pressure range as 0–1. */
-    private static float travel(float pressure) {
+    static float travel(float pressure) {
         if(!Float.isFinite(pressure)) pressure=0;
         return Math.max(0,Math.min(1,(pressure-.05f)/.40f));
     }
