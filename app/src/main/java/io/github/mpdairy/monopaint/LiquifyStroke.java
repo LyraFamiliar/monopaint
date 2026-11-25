@@ -5,9 +5,11 @@ package io.github.mpdairy.monopaint;
  * colors. Accumulates a coarse per-stroke displacement field and always resamples the
  * stroke-start layer content so repeated sub-steps within a stroke do not build up blur.
  *
- * <p>Pen samples only update the field, which is cheap; the pixels are resampled once per
- * {@link #settle}, which the canvas calls after each batch of samples, so a fast pen never
- * queues up more resampling than one pass over the area that moved.
+ * <p>Pen samples only update the field, which is cheap; the pixels are resampled in
+ * {@link #settle}, which the canvas calls after each batch of samples. Consecutive batches
+ * cover nearly the same pixels, so settle paces itself: after a resample that took T it
+ * waits at least T more before the next, folding the batches in between into one pass. A
+ * fast tablet resamples every batch; a slow one stays with the pen instead of falling behind.
  */
 final class LiquifyStroke implements DrawingStroke {
     /** Displacement grid spacing in page pixels. */
@@ -23,8 +25,14 @@ final class LiquifyStroke implements DrawingStroke {
     private final int width, height, cols, rows;
     /** Output pixel p shows stroke-start content at p + D(p), bilinearly interpolated from this grid. */
     private float[] dx, dy;
-    /** Nodes this stroke has moved; pixels between untouched nodes still show the stroke-start layer. */
-    private boolean[] touched;
+    /**
+     * The resample pass that last needs each node: 0 for nodes this stroke never moved, whose
+     * pixels still show the stroke-start layer; {@link #pass} for nodes moved since the last one.
+     */
+    private int[] moved;
+    private int pass = 1;
+    /** When the last resample ended and how long it took, for pacing; nanoseconds. */
+    private long settledAt, settleCost;
     private float[] scratchDx = new float[0], scratchDy = new float[0];
     private boolean started;
     private float lastX, lastY, lastRadius;
@@ -62,7 +70,10 @@ final class LiquifyStroke implements DrawingStroke {
             float maxStep = Math.max(.125f, Math.min(lastRadius, radius) / 4f);
             int steps = Math.max(1, (int)Math.ceil(dist / maxStep));
             float stepMx = mx / steps, stepMy = my / steps;
-            float strength = settings.strength / 100f * p;
+            // A light touch already pushes firmly, and the push rises quickly with Strength:
+            // half strength moves the paint about three quarters of the way with the pen.
+            float s = settings.strength / 100f;
+            float strength = (1 - (1 - s) * (1 - s)) * (.4f + .6f * (float)Math.sqrt(p));
             for (int i = 1; i <= steps; i++) {
                 float t = (float)i / steps;
                 float r = lastRadius + (radius - lastRadius) * t;
@@ -72,9 +83,17 @@ final class LiquifyStroke implements DrawingStroke {
         lastX = x; lastY = y; lastRadius = radius;
     }
 
-    /** Resamples the pixels around every node moved since the last call. */
+    /** Resamples what moved, unless the last resample was too recent to be worth another yet. */
     @Override public void settle() {
+        if (System.nanoTime() - settledAt < settleCost) return;
+        resample();
+    }
+
+    /** Resamples the pixels around every node moved since the last pass. */
+    private void resample() {
         if (pendMinX > pendMaxX || pendMinY > pendMaxY) return;
+        long start = System.nanoTime();
+        int current = pass++;
         // A pixel blends the nodes on either side of it, so it reaches one grid step past them.
         int left = Math.max(0, (pendMinX - 1) * G), top = Math.max(0, (pendMinY - 1) * G);
         int right = Math.min(width, (pendMaxX + 1) * G), bottom = Math.min(height, (pendMaxY + 1) * G);
@@ -88,7 +107,8 @@ final class LiquifyStroke implements DrawingStroke {
                 float px = x + .5f, gxf = px / G;
                 int gx0 = (int)gxf;
                 int i00 = row0 + gx0, i10 = i00 + 1, i01 = row1 + gx0, i11 = i01 + 1;
-                if (!touched[i00] && !touched[i10] && !touched[i01] && !touched[i11]) continue;
+                // Only pixels beside a node moved since the last pass can change.
+                if (moved[i00] != current && moved[i10] != current && moved[i01] != current && moved[i11] != current) continue;
                 float tx = gxf - gx0, itx = 1f - tx;
                 float w00 = itx * ity, w10 = tx * ity, w01 = itx * ty, w11 = tx * ty;
                 float ddx = dx[i00] * w00 + dx[i10] * w10 + dx[i01] * w01 + dx[i11] * w11;
@@ -98,15 +118,16 @@ final class LiquifyStroke implements DrawingStroke {
                 else document.paintTone(x, y, pixel >>> 8, pixel & 255);
             }
         }
+        settledAt = System.nanoTime(); settleCost = settledAt - start;
     }
 
-    @Override public boolean finish() { settle(); return document.finish(); }
+    @Override public boolean finish() { resample(); return document.finish(); }
 
     private void ensureField() {
         if (dx == null) {
             dx = new float[cols * rows];
             dy = new float[cols * rows];
-            touched = new boolean[cols * rows];
+            moved = new int[cols * rows];
         }
     }
 
@@ -168,7 +189,7 @@ final class LiquifyStroke implements DrawingStroke {
                 int idx = gy * cols + gx;
                 dx[idx] = oldDx - wmx;
                 dy[idx] = oldDy - wmy;
-                touched[idx] = true;
+                moved[idx] = pass;
             }
         }
     }
@@ -179,9 +200,10 @@ final class LiquifyStroke implements DrawingStroke {
         int x0 = (int)Math.floor(qx), y0 = (int)Math.floor(qy);
         int x1 = x0 + 1, y1 = y0 + 1;
         if (x1 < 0 || y1 < 0 || x0 >= width || y0 >= height) return 0;
-        return ToneDocument.blendBilinear(
-                basePixel(x0, y0), basePixel(x1, y0), basePixel(x0, y1), basePixel(x1, y1),
-                qx - x0, qy - y0);
+        int p00 = basePixel(x0, y0), p10 = basePixel(x1, y0), p01 = basePixel(x0, y1), p11 = basePixel(x1, y1);
+        // Most of a page is flat paper or solid paint, where blending would change nothing.
+        if (p00 == p10 && p00 == p01 && p00 == p11) return (p00 & 255) == 0 ? 0 : p00;
+        return ToneDocument.blendBilinear(p00, p10, p01, p11, qx - x0, qy - y0);
     }
 
     private int basePixel(int x, int y) {
