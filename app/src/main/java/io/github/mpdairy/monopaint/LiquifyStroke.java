@@ -4,19 +4,32 @@ package io.github.mpdairy.monopaint;
  * Forward-warp push brush: displaces the active layer along the pen's path without blending
  * colors. Accumulates a coarse per-stroke displacement field and always resamples the
  * stroke-start layer content so repeated sub-steps within a stroke do not build up blur.
+ *
+ * <p>Pen samples only update the field, which is cheap; the pixels are resampled once per
+ * {@link #settle}, which the canvas calls after each batch of samples, so a fast pen never
+ * queues up more resampling than one pass over the area that moved.
  */
 final class LiquifyStroke implements DrawingStroke {
     /** Displacement grid spacing in page pixels. */
     private static final int G = 4;
+    /**
+     * The active layer as the stroke found it, reused between strokes so a pen-down doesn't
+     * allocate a page-sized buffer each time. Strokes run one at a time on the UI thread.
+     */
+    private static byte[] baseTones = new byte[0], baseAlpha = new byte[0];
 
     private final ToneDocument document;
     private final ToolSettings settings;
     private final int width, height, cols, rows;
     /** Output pixel p shows stroke-start content at p + D(p), bilinearly interpolated from this grid. */
     private float[] dx, dy;
+    /** Nodes this stroke has moved; pixels between untouched nodes still show the stroke-start layer. */
+    private boolean[] touched;
     private float[] scratchDx = new float[0], scratchDy = new float[0];
     private boolean started;
     private float lastX, lastY, lastRadius;
+    /** Nodes moved since the last {@link #settle}: an inclusive node rectangle, empty when minX > maxX. */
+    private int pendMinX = Integer.MAX_VALUE, pendMinY = Integer.MAX_VALUE, pendMaxX = -1, pendMaxY = -1;
 
     LiquifyStroke(ToneDocument document, ToolSettings settings) {
         this.document = document;
@@ -25,7 +38,11 @@ final class LiquifyStroke implements DrawingStroke {
         this.height = document.height;
         this.cols = width / G + 2;
         this.rows = height / G + 2;
-        document.begin();
+        // Liquify reshapes artwork, so it works on the layer even while gestures lay masking fluid.
+        document.beginLayer();
+        int size = width * height;
+        if (baseTones.length < size) { baseTones = new byte[size]; baseAlpha = new byte[size]; }
+        document.copyLayer(0, 0, width, height, baseTones, baseAlpha);
     }
 
     @Override public void sample(float x, float y, float pressure, float tiltX, float tiltY) {
@@ -48,24 +65,48 @@ final class LiquifyStroke implements DrawingStroke {
             float strength = settings.strength / 100f * p;
             for (int i = 1; i <= steps; i++) {
                 float t = (float)i / steps;
-                float cx = lastX + mx * t, cy = lastY + my * t;
                 float r = lastRadius + (radius - lastRadius) * t;
-                pushField(cx, cy, stepMx, stepMy, r, strength);
+                pushField(lastX + mx * t, lastY + my * t, stepMx, stepMy, r, strength);
             }
-            float c1x = lastX + stepMx, c1y = lastY + stepMy;
-            float r1 = lastRadius + (radius - lastRadius) / steps;
-            // Pixels up to one grid step beyond the brush blend in nodes it moved, so redraw them too.
-            renderRegion(c1x, c1y, r1 + G, x, y, radius + G);
         }
         lastX = x; lastY = y; lastRadius = radius;
     }
 
-    @Override public boolean finish() { return document.finish(); }
+    /** Resamples the pixels around every node moved since the last call. */
+    @Override public void settle() {
+        if (pendMinX > pendMaxX || pendMinY > pendMaxY) return;
+        // A pixel blends the nodes on either side of it, so it reaches one grid step past them.
+        int left = Math.max(0, (pendMinX - 1) * G), top = Math.max(0, (pendMinY - 1) * G);
+        int right = Math.min(width, (pendMaxX + 1) * G), bottom = Math.min(height, (pendMaxY + 1) * G);
+        pendMinX = pendMinY = Integer.MAX_VALUE; pendMaxX = pendMaxY = -1;
+        for (int y = top; y < bottom; y++) {
+            float py = y + .5f, gyf = py / G;
+            int gy0 = (int)gyf;
+            float ty = gyf - gy0, ity = 1f - ty;
+            int row0 = gy0 * cols, row1 = row0 + cols;
+            for (int x = left; x < right; x++) {
+                float px = x + .5f, gxf = px / G;
+                int gx0 = (int)gxf;
+                int i00 = row0 + gx0, i10 = i00 + 1, i01 = row1 + gx0, i11 = i01 + 1;
+                if (!touched[i00] && !touched[i10] && !touched[i01] && !touched[i11]) continue;
+                float tx = gxf - gx0, itx = 1f - tx;
+                float w00 = itx * ity, w10 = tx * ity, w01 = itx * ty, w11 = tx * ty;
+                float ddx = dx[i00] * w00 + dx[i10] * w10 + dx[i01] * w01 + dx[i11] * w11;
+                float ddy = dy[i00] * w00 + dy[i10] * w10 + dy[i01] * w01 + dy[i11] * w11;
+                int pixel = sampleBase(px + ddx, py + ddy);
+                if (pixel == 0) document.paintTone(x, y, 255, 0);
+                else document.paintTone(x, y, pixel >>> 8, pixel & 255);
+            }
+        }
+    }
+
+    @Override public boolean finish() { settle(); return document.finish(); }
 
     private void ensureField() {
         if (dx == null) {
             dx = new float[cols * rows];
             dy = new float[cols * rows];
+            touched = new boolean[cols * rows];
         }
     }
 
@@ -95,6 +136,9 @@ final class LiquifyStroke implements DrawingStroke {
         int updMinY = Math.max(0, (int)Math.ceil((cy - r) / G));
         int updMaxX = Math.min(cols - 1, (int)Math.floor((cx + r) / G));
         int updMaxY = Math.min(rows - 1, (int)Math.floor((cy + r) / G));
+        if (updMinX > updMaxX || updMinY > updMaxY) return;
+        pendMinX = Math.min(pendMinX, updMinX); pendMinY = Math.min(pendMinY, updMinY);
+        pendMaxX = Math.max(pendMaxX, updMaxX); pendMaxY = Math.max(pendMaxY, updMaxY);
         float maxGridX = (cols - 1) * G, maxGridY = (rows - 1) * G;
         for (int gy = updMinY; gy <= updMaxY; gy++) {
             float ny = gy * G, dyc = ny - cy, dyc2 = dyc * dyc;
@@ -124,46 +168,7 @@ final class LiquifyStroke implements DrawingStroke {
                 int idx = gy * cols + gx;
                 dx[idx] = oldDx - wmx;
                 dy[idx] = oldDy - wmy;
-            }
-        }
-    }
-
-    /** Re-renders pixels swept by the sub-steps from (ax, ay, ra) to (bx, by, rb) from stroke-start content. */
-    private void renderRegion(float ax, float ay, float ra, float bx, float by, float rb) {
-        int left = Math.max(0, (int)Math.floor(Math.min(ax - ra, bx - rb)));
-        int top = Math.max(0, (int)Math.floor(Math.min(ay - ra, by - rb)));
-        int right = Math.min(width, (int)Math.ceil(Math.max(ax + ra, bx + rb)));
-        int bottom = Math.min(height, (int)Math.ceil(Math.max(ay + ra, by + rb)));
-        if (left >= right || top >= bottom) return;
-        float segX = bx - ax, segY = by - ay, segLen2 = segX * segX + segY * segY;
-        float ra2 = ra * ra;
-        for (int y = top; y < bottom; y++) {
-            float py = y + .5f;
-            float gyf = py / G;
-            int gy0 = (int)gyf, gy1 = gy0 + 1;
-            float ty = gyf - gy0, ity = 1f - ty;
-            int row0 = gy0 * cols, row1 = gy1 * cols;
-            for (int x = left; x < right; x++) {
-                float px = x + .5f;
-                if (segLen2 == 0f) {
-                    float dxc = px - ax, dyc = py - ay;
-                    if (dxc * dxc + dyc * dyc >= ra2) continue;
-                } else {
-                    float u = Math.max(0f, Math.min(1f, ((px - ax) * segX + (py - ay) * segY) / segLen2));
-                    float cx = ax + segX * u, cy = ay + segY * u, r = ra + (rb - ra) * u;
-                    float dxc = px - cx, dyc = py - cy;
-                    if (dxc * dxc + dyc * dyc >= r * r) continue;
-                }
-                float gxf = px / G;
-                int gx0 = (int)gxf, gx1 = gx0 + 1;
-                float tx = gxf - gx0, itx = 1f - tx;
-                float w00 = itx * ity, w10 = tx * ity, w01 = itx * ty, w11 = tx * ty;
-                int i00 = row0 + gx0, i10 = row0 + gx1, i01 = row1 + gx0, i11 = row1 + gx1;
-                float ddx = dx[i00] * w00 + dx[i10] * w10 + dx[i01] * w01 + dx[i11] * w11;
-                float ddy = dy[i00] * w00 + dy[i10] * w10 + dy[i01] * w01 + dy[i11] * w11;
-                int pixel = sampleBase(px + ddx, py + ddy);
-                if (pixel == 0) document.paintTone(x, y, 255, 0);
-                else document.paintTone(x, y, pixel >>> 8, pixel & 255);
+                touched[idx] = true;
             }
         }
     }
@@ -181,6 +186,7 @@ final class LiquifyStroke implements DrawingStroke {
 
     private int basePixel(int x, int y) {
         if (x < 0 || y < 0 || x >= width || y >= height) return 0;
-        return document.strokeBasePixel(x, y);
+        int i = y * width + x;
+        return (baseTones[i] & 255) << 8 | (baseAlpha[i] & 255);
     }
 }

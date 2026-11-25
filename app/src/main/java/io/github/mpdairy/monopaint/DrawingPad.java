@@ -556,6 +556,7 @@ final class DrawingPad extends View {
                 drawingInput = true;
                 for (int h = 0; h < event.getHistorySize(); h++) sampleEvent(event, p, h);
                 if (action == MotionEvent.ACTION_MOVE) sampleEvent(event, p, -1);
+                stroke.settle();
             }
         }
         renderDirty(); flush(false);

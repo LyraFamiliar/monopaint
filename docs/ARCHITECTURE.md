@@ -47,7 +47,9 @@ To add a tool:
 4. Return its `DrawingStroke` from `ToolStrokes.create`. A stroke receives pen samples
    in page coordinates and edits the `ToneDocument`; `finish()` commits one undo step
    (for example, `LiquifyStroke` accumulates a coarse displacement field per stroke and
-   resamples stroke-start pixels directly).
+   resamples stroke-start pixels directly). A stroke whose drawing is costly can defer it to
+   `settle()`, which `DrawingPad` calls once per batch of pen samples before rendering, so a
+   fast pen never queues more work than one pass per event; Liquify does this.
 5. Add it to `Toolbar.TOOLS` to show it in the side toolbar.
 
 Fill, Shapes and Lasso are drag-and-release gestures rather than strokes. `DrawingPad` runs
