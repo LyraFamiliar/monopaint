@@ -46,8 +46,11 @@ To add a tool:
    `ToolSettings`; the panel saves and refreshes the toolbar automatically.
 4. Return its `DrawingStroke` from `ToolStrokes.create`. A stroke receives pen samples
    in page coordinates and edits the `ToneDocument`; `finish()` commits one undo step
-   (for example, `LiquifyStroke` accumulates a coarse displacement field per stroke and
-   resamples stroke-start pixels directly). A stroke whose drawing is costly can defer it to
+   (for example, `LiquifyStroke` keeps a persistent session across consecutive Liquify
+   strokes on the same layer—sharing one coarse displacement field and session-start
+   snapshot until `ToneDocument.edits()` changes from another edit, undo, or layer
+   switch—so repeated strokes never compound blur and Reconstruct can relax back to the
+   original). A stroke whose drawing is costly can defer it to
    `settle()`, which `DrawingPad` calls once per batch of pen samples before rendering, so a
    fast pen never queues more work than one pass per event; Liquify does this.
 5. Add it to `Toolbar.TOOLS` to show it in the side toolbar.

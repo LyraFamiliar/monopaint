@@ -70,7 +70,8 @@ final class ToolLibrary {
             ToolSettings candidate = preset.settings.asBrush();
             if (candidate.tool == type.tool && candidate.head == type.head
                     && (type.tool != ToolSettings.Tool.SHAPES || candidate.shape == type.shape)
-                    && (type.tool != ToolSettings.Tool.FILL || candidate.gradient == type.gradient)) number++;
+                    && (type.tool != ToolSettings.Tool.FILL || candidate.gradient == type.gradient)
+                    && (type.tool != ToolSettings.Tool.LIQUIFY || candidate.liquify == type.liquify)) number++;
             if (preset.id.equals(id)) return number;
         }
         throw new IllegalArgumentException("Preset no longer exists");
@@ -95,7 +96,7 @@ final class ToolLibrary {
         return trimmed;
     }
     /** Current preset format. When appending a tool, bump this and extend {@link #toolCount}; when appending a field, bump this and read it from the new version. */
-    private static final int FORMAT = 0x5453504b;
+    private static final int FORMAT = 0x5453504c;
     byte[] encode() throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(); DataOutputStream out = new DataOutputStream(bytes);
         out.writeInt(FORMAT);
@@ -161,6 +162,7 @@ final class ToolLibrary {
         // now keeps its clear water choice here, so older presets read it as holding ink.
         out.writeBoolean(settings.clearWater);
         out.writeInt(settings.coverage);
+        out.writeByte(settings.liquify.ordinal());
     }
     private static ToolSettings read(DataInputStream in, int version) throws IOException {
         int tool = in.readUnsignedByte();
@@ -190,13 +192,15 @@ final class ToolLibrary {
         int minimumLoad=version>=0x54535047?in.readInt():ToolSettings.DEFAULT_MINIMUM_LOAD;
         boolean clearWater = version >= 0x54535048 && in.readBoolean() && tool == ToolSettings.Tool.WET_BRUSH_PEN.ordinal();
         int coverage = version >= 0x54535049 ? in.readInt() : ToolSettings.DEFAULT_COVERAGE;
+        int liquify = version >= 0x5453504c ? in.readUnsignedByte() : 0;
         if(shape>=ToolSettings.Shape.values().length) throw new IOException("Unknown shape");
         if(gradient>=ToolSettings.Gradient.values().length) throw new IOException("Unknown gradient type");
         if (head >= ToolSettings.Head.values().length) throw new IOException("Unknown brush head");
+        if (liquify >= ToolSettings.Liquify.values().length) throw new IOException("Unknown liquify mode");
         // Earlier builds ignored Flat's stored thickness and always drew 1px.
         // Preserve that appearance until the user changes the new height slider.
         if (version < 0x5453503d && head == ToolSettings.Head.FLAT.ordinal()) headThickness=0;
-        return new ToolSettings(ToolSettings.Tool.values()[tool], minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, ToolSettings.Head.values()[head], angle, bristles, headThickness, ToolSettings.Gradient.values()[gradient], ToolSettings.Shape.values()[shape], filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad).clearWater(clearWater).coverage(coverage).automaticHead();
+        return new ToolSettings(ToolSettings.Tool.values()[tool], minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, ToolSettings.Head.values()[head], angle, bristles, headThickness, ToolSettings.Gradient.values()[gradient], ToolSettings.Shape.values()[shape], filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad).clearWater(clearWater).coverage(coverage).liquify(ToolSettings.Liquify.values()[liquify]).automaticHead();
     }
     static final class Preset {
         final String id, name; final ToolSettings settings;

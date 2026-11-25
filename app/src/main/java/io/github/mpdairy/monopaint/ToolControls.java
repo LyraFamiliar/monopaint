@@ -22,7 +22,7 @@ final class ToolControls {
             case PENCIL: pencil(form, textSize); break;
             case ERASER: eraser(form, textSize); break;
             case SOFTEN: soften(form, textSize); break;
-            case LIQUIFY: liquify(form, textSize); break;
+            case LIQUIFY: liquify(form, current, textSize); break;
             case AIRBRUSH: airbrush(form, textSize); break;
             case BRUSH_PEN: case WET_BRUSH_PEN: brushPen(form, current, textSize); break;
             case FILL: fill(form, current); break;
@@ -82,11 +82,18 @@ final class ToolControls {
         form.hint("Pull shading in the direction you rub. Lower strength blends gently; repeat passes to build it up.");
     }
 
-    private static void liquify(SettingsForm form, float textSize) {
+    private static void liquify(SettingsForm form, ToolSettings current, float textSize) {
         form.footprint(84, textSize);
         sizes(form, "diameter", ToolSettings.MAX_LIQUIFY);
         form.percent("Strength", s -> s.strength, ToolSettings::strength);
-        form.hint("Push and nudge paint in the direction you drag.");
+        switch (current.liquify) {
+            case PUSH: form.hint("Push and nudge paint in the direction you drag."); break;
+            case BLOAT: form.hint("Expand paint outward from under the brush."); break;
+            case PINCH: form.hint("Pull paint inward toward the center of the brush."); break;
+            case TWIRL_RIGHT: form.hint("Swirl paint clockwise under the brush."); break;
+            case TWIRL_LEFT: form.hint("Swirl paint counter-clockwise under the brush."); break;
+            case RECONSTRUCT: form.hint("Relax warped paint back toward where you started."); break;
+        }
     }
 
     private static void brushPen(SettingsForm form, ToolSettings current, float textSize) {
@@ -140,7 +147,8 @@ final class ToolControls {
 
     /** The variant row above a tool's controls, or null for tools without variants. */
     static LinearLayout variants(Context context, ToolSettings current, boolean shapeChosen, Consumer<ToolSettings.Head> head,
-                                 Consumer<ToolSettings.Tool> pen, Consumer<ToolSettings.Gradient> fill, Consumer<ToolSettings.Shape> shape) {
+                                 Consumer<ToolSettings.Tool> pen, Consumer<ToolSettings.Gradient> fill, Consumer<ToolSettings.Shape> shape,
+                                 Consumer<ToolSettings.Liquify> liquify) {
         LinearLayout row = new LinearLayout(context);
         if (current.tool.water) {
             row.setContentDescription("Brush pens");
@@ -168,6 +176,21 @@ final class ToolControls {
                 Button button = SettingsForm.choice(context, choice.label, ToolIcons.shape(choice),
                         current.shape == choice && shapeChosen, () -> shape.accept(choice));
                 button.setContentDescription(choice.label + " shape"); SettingsForm.addChoice(row, button, 84);
+            }
+        } else if (current.tool == ToolSettings.Tool.LIQUIFY) {
+            row.setOrientation(LinearLayout.VERTICAL); row.setContentDescription("Liquify modes");
+            ToolSettings.Liquify[] modes = ToolSettings.Liquify.values();
+            for (int start = 0; start < modes.length; start += 3) {
+                LinearLayout line = new LinearLayout(context); line.setBaselineAligned(false);
+                for (int i = start; i < Math.min(start + 3, modes.length); i++) {
+                    ToolSettings.Liquify choice = modes[i];
+                    Button button = SettingsForm.choice(context, choice.label, ToolIcons.liquify(choice),
+                            current.liquify == choice, () -> liquify.accept(choice));
+                    button.setContentDescription(choice.label + " liquify"); SettingsForm.addChoice(line, button, 88);
+                }
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+                if (start > 0) params.topMargin = Ui.dp(context, 4);
+                row.addView(line, params);
             }
         } else return null;
         return row;

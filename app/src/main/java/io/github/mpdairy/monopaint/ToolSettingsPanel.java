@@ -40,7 +40,8 @@ final class ToolSettingsPanel extends SidePanel {
                     library().edit(library().current().shape(shape));
                     if (presetId.isEmpty()) app.prefs.setShapeChosen();
                     variantChosen();
-                });
+                },
+                liquify -> { library().edit(library().current().liquify(liquify)); variantChosen(); });
         if (variants != null) panel.addView(variants);
         SettingsForm form = null;
         if (tool != ToolSettings.Tool.SHAPES || shapeChosen()) {

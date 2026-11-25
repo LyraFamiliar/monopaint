@@ -11,7 +11,12 @@ public final class LiquifyChecks {
         transparentLayers();
         fastStrokeSubStepping();
         pageEdge();
-        System.out.println("PASS: liquify forward warp, radius boundary, no-op/undo, transparent layer isolation, fast sub-stepping and page edges");
+        sessionPersistence();
+        sessionResetAndUndo();
+        bloatPinchTwirl();
+        reconstruct();
+        documentEditsCounter();
+        System.out.println("PASS: liquify modes (push/bloat/pinch/twirl/reconstruct), session continuity/reset, undo, edits() counter, radius boundary, transparent layers and page edges");
     }
 
     /** A small black square pushed right moves right (less than pen travel) without washing out. */
@@ -225,6 +230,315 @@ public final class LiquifyChecks {
         stroke.sample(20, 32, .45f, 0, 0);
         check(stroke.finish(), "Edge push commits cleanly");
         check(doc.opacity(0, 32) < 255, "Pulling inward from page edge draws in transparency");
+    }
+
+    /** Two push strokes in a row share one session snapshot, avoiding compounded resampling blur. */
+    private static void sessionPersistence() {
+        int w = 160, h = 160;
+        // High-contrast vertical stripes so resampling blur is clearly measurable.
+        byte[] stripes = new byte[w * h];
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            stripes[y * w + x] = (byte)(((x / 2) % 2 == 0) ? 0 : 255);
+        ToneDocument sameSession = new ToneDocument(w, h, stripes);
+        ToneDocument brokenSession = new ToneDocument(w, h, stripes);
+        ToolSettings push = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).size(64).minimum(64).strength(80);
+
+        // A session keeps one field and one original, so two strokes in a row along a path give
+        // exactly what one stroke along the whole path gives. Pushing back the way you came is not
+        // an exact inverse of a forward warp, so it can't serve as the measure here.
+        ToneDocument oneStroke = new ToneDocument(w, h, stripes);
+        LiquifyStroke whole = new LiquifyStroke(oneStroke, push);
+        for (int x = 60; x <= 90; x += 5) whole.sample(x, 80, .45f, 0, 0);
+        check(whole.finish(), "Single whole-path push commits");
+        byte[] single = layerSnapshot(oneStroke);
+
+        // Same path split into two strokes, with a no-op stroke between that must not break the session.
+        LiquifyStroke s1 = new LiquifyStroke(sameSession, push);
+        for (int x = 60; x <= 75; x += 5) s1.sample(x, 80, .45f, 0, 0);
+        check(s1.finish(), "First session push commits");
+
+        LiquifyStroke noop = new LiquifyStroke(sameSession, push);
+        noop.sample(80, 80, .45f, 0, 0);
+        check(!noop.finish(), "Stationary push no-op commits nothing");
+
+        LiquifyStroke s2 = new LiquifyStroke(sameSession, push);
+        for (int x = 75; x <= 90; x += 5) s2.sample(x, 80, .45f, 0, 0);
+        check(s2.finish(), "Second push in the same session commits");
+        check(Arrays.equals(single, layerSnapshot(sameSession)),
+                "Two strokes in one session match one stroke along the whole path exactly");
+
+        // The same split path with an unrelated edit between: the second stroke starts a new
+        // session and resamples already-resampled pixels, so the result differs.
+        LiquifyStroke b1 = new LiquifyStroke(brokenSession, push);
+        for (int x = 60; x <= 75; x += 5) b1.sample(x, 80, .45f, 0, 0);
+        check(b1.finish(), "First broken-session push commits");
+
+        brokenSession.begin();
+        brokenSession.paintTone(0, 0, 128, 255);
+        check(brokenSession.finish(), "Unrelated edit commits and breaks session");
+
+        LiquifyStroke b2 = new LiquifyStroke(brokenSession, push);
+        for (int x = 75; x <= 90; x += 5) b2.sample(x, 80, .45f, 0, 0);
+        check(b2.finish(), "Second push after a broken session commits");
+        double brokenDiff = meanAbsDiff(single, brokenSession, 20, 40, 140, 120);
+        check(brokenDiff > 1, "A broken session resamples from the edited pixels: diff=" + brokenDiff);
+    }
+
+    /** Other-tool edits, undo, and layer switches break the session; undo after two strokes undoes only the second. */
+    private static void sessionResetAndUndo() {
+        int w = 128, h = 128;
+        ToolSettings push = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).size(48).minimum(48).strength(85);
+        ToolSettings recon = push.liquify(ToolSettings.Liquify.RECONSTRUCT).strength(100);
+
+        // 1. Undo after two session strokes undoes only the second, and breaks the session.
+        ToneDocument doc = centerBar(w, h, 56, 68);
+        LiquifyStroke first = new LiquifyStroke(doc, push);
+        for (int x = 60; x <= 84; x += 4) first.sample(x, 64, .45f, 0, 0);
+        check(first.finish(), "First push commits");
+        byte[] afterFirst = doc.snapshot();
+
+        LiquifyStroke second = new LiquifyStroke(doc, push);
+        for (int x = 60; x <= 84; x += 4) second.sample(x, 64, .45f, 0, 0);
+        check(second.finish(), "Second push commits");
+        check(!Arrays.equals(afterFirst, doc.snapshot()), "Second push moves pixels further");
+
+        check(doc.undo(), "Undo reverts only the second stroke");
+        check(Arrays.equals(afterFirst, doc.snapshot()), "After one undo, layer matches state after first stroke");
+
+        // Because undo incremented edits(), a new session starts from the undone pixels (zero field).
+        LiquifyStroke reconAfterUndo = new LiquifyStroke(doc, recon);
+        for (int i = 0; i < 10; i++) reconAfterUndo.sample(68, 64, .45f, 0, 0);
+        check(!reconAfterUndo.finish(), "Undo breaks liquify session so reconstruct sees a fresh zero field");
+
+        // 2. An edit by another tool breaks the session.
+        LiquifyStroke third = new LiquifyStroke(doc, push);
+        for (int x = 60; x <= 80; x += 4) third.sample(x, 64, .45f, 0, 0);
+        check(third.finish(), "Push before other-tool edit commits");
+        doc.begin();
+        doc.paintTone(4, 4, 100, 255);
+        check(doc.finish(), "Other-tool paint commits");
+        LiquifyStroke reconAfterPaint = new LiquifyStroke(doc, recon);
+        for (int i = 0; i < 10; i++) reconAfterPaint.sample(68, 64, .45f, 0, 0);
+        check(!reconAfterPaint.finish(), "Other-tool edit breaks liquify session");
+
+        // 3. Layer switch breaks the session (even switching away and back).
+        doc.addLayer();
+        doc.selectLayer(0);
+        LiquifyStroke fourth = new LiquifyStroke(doc, push);
+        for (int x = 60; x <= 80; x += 4) fourth.sample(x, 64, .45f, 0, 0);
+        check(fourth.finish(), "Push on layer 0 commits");
+        doc.selectLayer(1);
+        doc.selectLayer(0);
+        LiquifyStroke reconAfterLayerSwitch = new LiquifyStroke(doc, recon);
+        for (int i = 0; i < 10; i++) reconAfterLayerSwitch.sample(68, 64, .45f, 0, 0);
+        check(!reconAfterLayerSwitch.finish(), "Layer switch breaks liquify session");
+    }
+
+    /** Bloat expands a dot, Pinch shrinks a disc, Twirl rotates clockwise/CCW, all acting while stationary. */
+    private static void bloatPinchTwirl() {
+        int w = 160, h = 160;
+        // BLOAT: small centered dot grows in covered pixel count from stationary samples.
+        ToneDocument bloatDoc = new ToneDocument(w, h);
+        bloatDoc.begin();
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            if (Math.hypot(x + .5 - 80, y + .5 - 80) <= 10) bloatDoc.paintTone(x, y, 0, 255);
+        bloatDoc.finish();
+        int dotBefore = coveredPixels(bloatDoc);
+        ToolSettings bloat = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).liquify(ToolSettings.Liquify.BLOAT)
+                .size(100).minimum(100).strength(100);
+        LiquifyStroke bloatStroke = new LiquifyStroke(bloatDoc, bloat);
+        for (int i = 0; i < 15; i++) bloatStroke.sample(80, 80, .45f, 0, 0);
+        check(bloatStroke.finish(), "Stationary bloat commits an edit");
+        int dotAfter = coveredPixels(bloatDoc);
+        check(dotAfter > dotBefore * 1.4, "Bloat enlarges centered dot: before=" + dotBefore + " after=" + dotAfter);
+
+        // PINCH: large centered disc shrinks in covered pixel count from stationary samples.
+        ToneDocument pinchDoc = new ToneDocument(w, h);
+        pinchDoc.begin();
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+            if (Math.hypot(x + .5 - 80, y + .5 - 80) <= 28) pinchDoc.paintTone(x, y, 0, 255);
+        pinchDoc.finish();
+        int discBefore = coveredPixels(pinchDoc);
+        ToolSettings pinch = bloat.liquify(ToolSettings.Liquify.PINCH);
+        LiquifyStroke pinchStroke = new LiquifyStroke(pinchDoc, pinch);
+        for (int i = 0; i < 15; i++) pinchStroke.sample(80, 80, .45f, 0, 0);
+        check(pinchStroke.finish(), "Stationary pinch commits an edit");
+        int discAfter = coveredPixels(pinchDoc);
+        check(discAfter < discBefore * 0.85, "Pinch shrinks centered disc: before=" + discBefore + " after=" + discAfter);
+
+        // TWIRL_RIGHT: horizontal bar through centre rotates clockwise (right end moves down, y increases).
+        ToneDocument cwDoc = horizontalBar(w, h, 80, 48, 112, 6);
+        double rightYBefore = halfCenterY(cwDoc, 88, 118);
+        ToolSettings twirlRight = bloat.liquify(ToolSettings.Liquify.TWIRL_RIGHT);
+        LiquifyStroke cwStroke = new LiquifyStroke(cwDoc, twirlRight);
+        for (int i = 0; i < 12; i++) cwStroke.sample(80, 80, .45f, 0, 0);
+        check(cwStroke.finish(), "Stationary twirl right commits an edit");
+        double rightYAfter = halfCenterY(cwDoc, 88, 118);
+        double leftYAfter = halfCenterY(cwDoc, 42, 72);
+        check(rightYAfter > rightYBefore + 2.0, "Twirl right rotates right end down (clockwise): before=" + rightYBefore + " after=" + rightYAfter);
+        check(leftYAfter < rightYBefore - 2.0, "Twirl right rotates left end up (clockwise): after=" + leftYAfter);
+
+        // TWIRL_LEFT: rotates counter-clockwise (right end moves up, y decreases).
+        ToneDocument ccwDoc = horizontalBar(w, h, 80, 48, 112, 6);
+        ToolSettings twirlLeft = bloat.liquify(ToolSettings.Liquify.TWIRL_LEFT);
+        LiquifyStroke ccwStroke = new LiquifyStroke(ccwDoc, twirlLeft);
+        for (int i = 0; i < 12; i++) ccwStroke.sample(80, 80, .45f, 0, 0);
+        check(ccwStroke.finish(), "Stationary twirl left commits an edit");
+        double ccwRightY = halfCenterY(ccwDoc, 88, 118);
+        check(ccwRightY < rightYBefore - 2.0, "Twirl left rotates right end up (counter-clockwise): after=" + ccwRightY);
+    }
+
+    /** Reconstruct in the same session relaxes a pushed bar back close to the original. */
+    private static void reconstruct() {
+        int w = 160, h = 160;
+        ToneDocument doc = centerBar(w, h, 72, 84);
+        byte[] original = doc.snapshot();
+        ToolSettings push = ToolSettings.defaults(ToolSettings.Tool.LIQUIFY).size(72).minimum(72).strength(90);
+        LiquifyStroke pushStroke = new LiquifyStroke(doc, push);
+        for (int x = 76; x <= 104; x += 4) pushStroke.sample(x, 80, .45f, 0, 0);
+        check(pushStroke.finish(), "Push bar commits");
+        double pushedDiff = meanAbsDiff(original, doc, 30, 30, 140, 130);
+        check(pushedDiff > 5.0, "Push significantly displaces bar: diff=" + pushedDiff);
+
+        ToolSettings recon = push.liquify(ToolSettings.Liquify.RECONSTRUCT).size(100).minimum(100).strength(100);
+        LiquifyStroke reconStroke = new LiquifyStroke(doc, recon);
+        for (int pass = 0; pass < 40; pass++) {
+            reconStroke.sample(76, 80, .45f, 0, 0);
+            reconStroke.sample(96, 80, .45f, 0, 0);
+        }
+        check(reconStroke.finish(), "Reconstruct commits an edit");
+        double reconDiff = meanAbsDiff(original, doc, 30, 30, 140, 130);
+        check(reconDiff < pushedDiff * 0.15, "Reconstruct returns bar close to original: pushed=" + pushedDiff + " recon=" + reconDiff);
+    }
+
+    /** ToneDocument.edits() increments on every committed change and not on no-ops. */
+    private static void documentEditsCounter() {
+        ToneDocument doc = new ToneDocument(64, 64);
+        long e = doc.edits();
+
+        // No-op finish does not increment edits().
+        doc.begin();
+        check(!doc.finish(), "No-op finish returns false");
+        check(doc.edits() == e, "No-op finish does not increment edits()");
+
+        // Cancel does not increment edits().
+        doc.begin();
+        doc.paintTone(10, 10, 0, 255);
+        doc.cancel();
+        check(doc.edits() == e, "Cancel does not increment edits()");
+
+        // Committed finish increments edits().
+        doc.begin();
+        doc.paintTone(10, 10, 0, 255);
+        check(doc.finish(), "Paint finish returns true");
+        check(doc.edits() > e, "finish(true) increments edits()");
+        e = doc.edits();
+
+        // finishContinuation(true) increments edits().
+        doc.begin();
+        doc.paintTone(11, 10, 0, 255);
+        check(doc.finishContinuation(), "Continuation finish returns true");
+        check(doc.edits() > e, "finishContinuation(true) increments edits()");
+        e = doc.edits();
+
+        // undo and redo increment edits().
+        check(doc.undo(), "Undo succeeds");
+        check(doc.edits() > e, "undo increments edits()");
+        e = doc.edits();
+        check(!doc.undo(), "No-op undo returns false");
+        check(doc.edits() == e, "No-op undo does not increment edits()");
+        check(doc.redo(), "Redo succeeds");
+        check(doc.edits() > e, "redo increments edits()");
+        e = doc.edits();
+
+        // addLayer and selectLayer to a different layer increment edits(); selecting same layer does not.
+        doc.addLayer();
+        check(doc.edits() > e, "addLayer increments edits()");
+        e = doc.edits();
+        doc.selectLayer(doc.activeLayer());
+        check(doc.edits() == e, "selectLayer to same layer does not increment edits()");
+        doc.selectLayer(0);
+        check(doc.edits() > e, "selectLayer to different layer increments edits()");
+        e = doc.edits();
+
+        // Layer metadata/stack/expand/clear/peelMask edits increment edits().
+        doc.setLayerVisible(0, false);
+        check(doc.edits() > e, "setLayerVisible increments edits()");
+        e = doc.edits();
+        doc.setLayerVisible(0, true);
+        e = doc.edits();
+        doc.setLayerOpacity(0, 50);
+        check(doc.edits() > e, "setLayerOpacity increments edits()");
+        e = doc.edits();
+        doc.renameLayer("Sketch");
+        check(doc.edits() > e, "renameLayer increments edits()");
+        e = doc.edits();
+        doc.moveLayer(1);
+        check(doc.edits() > e, "moveLayer increments edits()");
+        e = doc.edits();
+        doc.removeLayer();
+        check(doc.edits() > e, "removeLayer increments edits()");
+        e = doc.edits();
+        doc.expand(4, 0, 0, 0);
+        check(doc.edits() > e, "expand increments edits()");
+        e = doc.edits();
+        doc.paintMaskingFluid(true);
+        doc.begin();
+        doc.paintTone(12, 12, 0, 255);
+        check(doc.finish(), "Mask paint commits");
+        doc.paintMaskingFluid(false);
+        e = doc.edits();
+        check(doc.peelMask(), "peelMask commits");
+        check(doc.edits() > e, "peelMask increments edits()");
+        // Clearing an empty layer rightly changes nothing, so give the active layer a mark first.
+        doc.begin();
+        doc.paintTone(5, 5, 0, 255);
+        check(doc.finish(), "Mark before clear commits");
+        e = doc.edits();
+        check(doc.clear(), "clear commits");
+        check(doc.edits() > e, "clear increments edits()");
+    }
+
+    private static ToneDocument horizontalBar(int w, int h, int cy, int x0, int x1, int halfThick) {
+        ToneDocument doc = new ToneDocument(w, h);
+        doc.begin();
+        for (int y = cy - halfThick; y < cy + halfThick; y++)
+            for (int x = x0; x < x1; x++) doc.paintTone(x, y, 0, 255);
+        doc.finish();
+        return doc;
+    }
+
+    private static double halfCenterY(ToneDocument doc, int x0, int x1) {
+        double sumY = 0, total = 0;
+        for (int y = 0; y < doc.height; y++) for (int x = x0; x < x1; x++) {
+            double mass = 255 - doc.compositeTone(x, y);
+            if (mass > 0) { sumY += (y + .5) * mass; total += mass; }
+        }
+        return sumY / total;
+    }
+
+    /** Every pixel's tone, row by row, as meanAbsDiff compares them. */
+    private static byte[] layerSnapshot(ToneDocument doc) {
+        byte[] tones = new byte[doc.width * doc.height];
+        for (int y = 0; y < doc.height; y++) for (int x = 0; x < doc.width; x++) tones[y * doc.width + x] = (byte)doc.tone(x, y);
+        return tones;
+    }
+
+    private static int coveredPixels(ToneDocument doc) {
+        int count = 0;
+        for (int y = 0; y < doc.height; y++) for (int x = 0; x < doc.width; x++)
+            if (doc.opacity(x, y) > 127) count++;
+        return count;
+    }
+
+    private static double meanAbsDiff(byte[] expected, ToneDocument doc, int x0, int y0, int x1, int y1) {
+        long sum = 0;
+        int n = 0;
+        for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+            sum += Math.abs((expected[y * doc.width + x] & 255) - doc.compositeTone(x, y));
+            n++;
+        }
+        return (double)sum / n;
     }
 
     private static ToneDocument centerBar(int w, int h, int x0, int x1) {

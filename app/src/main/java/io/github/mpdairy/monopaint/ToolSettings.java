@@ -79,7 +79,13 @@ final class ToolSettings {
         final String label;
         Shape(String label) { this.label=label; }
     }
+    enum Liquify {
+        PUSH("Push"), BLOAT("Bloat"), PINCH("Pinch"), TWIRL_RIGHT("Twirl right"), TWIRL_LEFT("Twirl left"), RECONSTRUCT("Reconstruct");
+        final String label;
+        Liquify(String label) { this.label = label; }
+    }
     final Shape shape;
+    final Liquify liquify;
     final boolean filled;
     final int outlineWidth;
     /** How far the brush pen pushes the paint it picks up along the stroke, 0–100. */
@@ -113,11 +119,12 @@ final class ToolSettings {
                 DEFAULT_PRESSURE_RESPONSE, Head.ROUND, 0, 0, DEFAULT_HEAD_THICKNESS, Gradient.LINEAR, Shape.LINE, false, 3, 0, UNLIMITED_PAINT, DEFAULT_LOADING_SPEED, DEFAULT_MINIMUM_LOAD);
     }
     ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad) {
-        this(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, false, DEFAULT_COVERAGE);
+        this(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, false, DEFAULT_COVERAGE, Liquify.PUSH);
     }
-    private ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad, boolean clearWater, int coverage) {
+    private ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad, boolean clearWater, int coverage, Liquify liquify) {
         if(shape==null || outlineWidth<1 || outlineWidth>128) throw new IllegalArgumentException("Invalid shape settings");
-        this.shape=shape; this.filled=filled; this.outlineWidth=outlineWidth; this.carry=carry; this.paintLoad=paintLoad; this.loadingSpeed=loadingSpeed; this.minimumLoad=minimumLoad;
+        if (liquify == null) throw new IllegalArgumentException("Invalid liquify mode");
+        this.shape=shape; this.liquify = liquify; this.filled=filled; this.outlineWidth=outlineWidth; this.carry=carry; this.paintLoad=paintLoad; this.loadingSpeed=loadingSpeed; this.minimumLoad=minimumLoad;
         this.clearWater = clearWater && tool.flowing; this.coverage = coverage;
         if (coverage < 0 || coverage > 100) throw new IllegalArgumentException("Invalid coverage");
         if (gradient == null || headThickness < 0 || headThickness > 100 || bristles < 0 || bristles > 100 || tool == null || head == null || angle < 0 || angle > 180
@@ -133,7 +140,7 @@ final class ToolSettings {
     }
     private ToolSettings(Values v) {
         this(v.tool, v.minimum, v.maximum, v.tip, v.softness, v.tilt, v.hardness, v.tolerance, v.strength, v.pressureResponse,
-                v.head, v.angle, v.bristles, v.headThickness, v.gradient, v.shape, v.filled, v.outlineWidth, v.carry, v.paintLoad, v.loadingSpeed, v.minimumLoad, v.clearWater, v.coverage);
+                v.head, v.angle, v.bristles, v.headThickness, v.gradient, v.shape, v.filled, v.outlineWidth, v.carry, v.paintLoad, v.loadingSpeed, v.minimumLoad, v.clearWater, v.coverage, v.liquify);
     }
     /** First-install settings; the toolbar's tools were tuned by hand on a Manta. */
     static ToolSettings defaults(Tool tool) {
@@ -162,14 +169,14 @@ final class ToolSettings {
 
     /** Mutable copy used to derive a changed, validated settings object. */
     private static final class Values {
-        Tool tool; Head head; Gradient gradient; Shape shape;
+        Tool tool; Head head; Gradient gradient; Shape shape; Liquify liquify;
         int minimum, maximum, tip, softness, hardness, tolerance, strength, pressureResponse, angle, bristles, headThickness, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, coverage;
         boolean tilt, filled, clearWater;
     }
     private interface Change { void apply(Values values); }
     private ToolSettings with(Change change) {
         Values v = new Values();
-        v.tool = tool; v.head = head; v.gradient = gradient; v.shape = shape;
+        v.tool = tool; v.head = head; v.gradient = gradient; v.shape = shape; v.liquify = liquify;
         v.minimum = minimum; v.maximum = maximum; v.tip = tip; v.softness = softness; v.hardness = hardness;
         v.tolerance = tolerance; v.strength = strength; v.pressureResponse = pressureResponse; v.angle = angle;
         v.bristles = bristles; v.headThickness = headThickness; v.outlineWidth = outlineWidth;
@@ -213,6 +220,7 @@ final class ToolSettings {
     }
     ToolSettings gradient(Gradient value) { return with(v -> v.gradient = value); }
     ToolSettings shape(Shape value) { return with(v -> v.shape = value); }
+    ToolSettings liquify(Liquify value) { return with(v -> v.liquify = value); }
     ToolSettings filled(boolean value) { return with(v -> v.filled = value); }
     ToolSettings outlineWidth(int value) { return with(v -> v.outlineWidth = value); }
     ToolSettings carry(int value) { return with(v -> v.carry = value); }
@@ -251,6 +259,7 @@ final class ToolSettings {
         if (tool == Tool.SHAPES) return shape.label + (shape == Shape.LINE ? "" : filled ? " filled" : " outline");
         if (isBrush()) return head.label + " " + label();
         if (tool == Tool.FILL) return gradient == Gradient.FLAT ? "Flat fill" : gradient.label + " gradient";
+        if (tool == Tool.LIQUIFY) return liquify.label + " " + label();
         return label();
     }
     /** The measured .05–.45 pen pressure range as 0–1. */
@@ -297,7 +306,7 @@ final class ToolSettings {
     @Override public boolean equals(Object other) {
         if (!(other instanceof ToolSettings)) return false;
         ToolSettings s = (ToolSettings)other;
-        return tool == s.tool && minimum == s.minimum && maximum == s.maximum && tip == s.tip && softness == s.softness && tilt == s.tilt && hardness == s.hardness && tolerance == s.tolerance && strength == s.strength && pressureResponse == s.pressureResponse && head == s.head && angle == s.angle && bristles == s.bristles && headThickness == s.headThickness && gradient == s.gradient && shape == s.shape && filled == s.filled && outlineWidth == s.outlineWidth && carry == s.carry && paintLoad == s.paintLoad && loadingSpeed == s.loadingSpeed && minimumLoad == s.minimumLoad && clearWater == s.clearWater && coverage == s.coverage;
+        return tool == s.tool && minimum == s.minimum && maximum == s.maximum && tip == s.tip && softness == s.softness && tilt == s.tilt && hardness == s.hardness && tolerance == s.tolerance && strength == s.strength && pressureResponse == s.pressureResponse && head == s.head && angle == s.angle && bristles == s.bristles && headThickness == s.headThickness && gradient == s.gradient && shape == s.shape && liquify == s.liquify && filled == s.filled && outlineWidth == s.outlineWidth && carry == s.carry && paintLoad == s.paintLoad && loadingSpeed == s.loadingSpeed && minimumLoad == s.minimumLoad && clearWater == s.clearWater && coverage == s.coverage;
     }
-    @Override public int hashCode() { return java.util.Objects.hash(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, clearWater, coverage); }
+    @Override public int hashCode() { return java.util.Objects.hash(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, liquify, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, clearWater, coverage); }
 }

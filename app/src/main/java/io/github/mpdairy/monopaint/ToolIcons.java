@@ -25,14 +25,28 @@ final class ToolIcons {
         }
     }
 
-    /** The icon for these exact settings: brush head, shape or fill type. */
+    /** The icon for these exact settings: brush head, shape, fill type or liquify mode. */
     static int of(ToolSettings settings) {
         settings = settings.asBrush();
         if (settings.isBrush() && settings.head != ToolSettings.Head.ROUND)
             return settings.head == ToolSettings.Head.FLAT ? R.drawable.ic_brush_flat : R.drawable.ic_brush_filbert;
         if (settings.tool == ToolSettings.Tool.SHAPES) return shape(settings.shape);
         if (settings.tool == ToolSettings.Tool.FILL) return fill(settings.gradient);
+        if (settings.tool == ToolSettings.Tool.LIQUIFY && settings.liquify != ToolSettings.Liquify.PUSH)
+            return liquify(settings.liquify);
         return of(settings.tool);
+    }
+
+    static int liquify(ToolSettings.Liquify mode) {
+        switch (mode) {
+            case PUSH: return R.drawable.ic_liquify_push;
+            case BLOAT: return R.drawable.ic_liquify_bloat;
+            case PINCH: return R.drawable.ic_liquify_pinch;
+            case TWIRL_RIGHT: return R.drawable.ic_liquify_twirl_right;
+            case TWIRL_LEFT: return R.drawable.ic_liquify_twirl_left;
+            case RECONSTRUCT: return R.drawable.ic_liquify_reconstruct;
+            default: throw new IllegalArgumentException("Unknown liquify mode: " + mode);
+        }
     }
 
     static int shape(ToolSettings.Shape shape) {

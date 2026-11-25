@@ -1,9 +1,13 @@
 package io.github.mpdairy.monopaint;
 
+import java.lang.ref.WeakReference;
+import java.util.Arrays;
+
 /**
- * Forward-warp push brush: displaces the active layer along the pen's path without blending
- * colors. Accumulates a coarse per-stroke displacement field and always resamples the
- * stroke-start layer content so repeated sub-steps within a stroke do not build up blur.
+ * Forward-warp liquify brush (Push, Bloat, Pinch, Twirl right/left and Reconstruct): reshapes
+ * the active layer without blending colors. Consecutive Liquify strokes on the same layer share
+ * one displacement field and one session-start layer snapshot, so repeated strokes never compound
+ * blur and Reconstruct can relax paint back toward the original.
  *
  * <p>Pen samples only update the field, which is cheap; the pixels are resampled in
  * {@link #settle}, which the canvas calls after each batch of samples. Consecutive batches
@@ -14,26 +18,72 @@ package io.github.mpdairy.monopaint;
 final class LiquifyStroke implements DrawingStroke {
     /** Displacement grid spacing in page pixels. */
     private static final int G = 4;
+    /** Gentle per-step scales at 100% strength and full pressure. */
+    private static final float BLOAT_SCALE = 0.04f;
+    private static final float TWIRL_RADIANS = (float)Math.toRadians(3.0);
+    private static final float RECONSTRUCT_RATE = 0.15f;
+
     /**
-     * The active layer as the stroke found it, reused between strokes so a pen-down doesn't
-     * allocate a page-sized buffer each time. Strokes run one at a time on the UI thread.
+     * Persistent liquify session shared across consecutive Liquify strokes on the same layer.
+     * Reuses page-sized buffers so pen-downs avoid allocating each time. Runs on the UI thread.
      */
-    private static byte[] baseTones = new byte[0], baseAlpha = new byte[0];
+    private static final class Session {
+        WeakReference<ToneDocument> document = new WeakReference<>(null);
+        int layer = -1, width, height, cols, rows;
+        long edits;
+        byte[] baseTones = new byte[0], baseAlpha = new byte[0];
+        /** Output pixel p shows session-start content at p + D(p), bilinearly interpolated from this grid. */
+        float[] dx = new float[0], dy = new float[0];
+        /**
+         * The resample pass that last moved each node: 0 for nodes never moved in this session;
+         * {@link #pass} for nodes moved since the last resample.
+         */
+        int[] moved = new int[0];
+        int pass = 1;
+        boolean hasField;
+        float[] scratchDx = new float[0], scratchDy = new float[0];
+
+        boolean matches(ToneDocument doc) {
+            return document.get() == doc && layer == doc.activeLayer() && edits == doc.edits()
+                    && width == doc.width && height == doc.height;
+        }
+
+        void reset(ToneDocument doc, int cols, int rows) {
+            document = new WeakReference<>(doc);
+            layer = doc.activeLayer();
+            width = doc.width; height = doc.height;
+            this.cols = cols; this.rows = rows;
+            edits = doc.edits();
+            int size = width * height;
+            if (baseTones.length < size) { baseTones = new byte[size]; baseAlpha = new byte[size]; }
+            doc.copyLayer(0, 0, width, height, baseTones, baseAlpha);
+            pass = 1;
+            hasField = false;
+        }
+
+        void ensureField() {
+            if (hasField) return;
+            int cells = cols * rows;
+            if (dx.length < cells) {
+                dx = new float[cells];
+                dy = new float[cells];
+                moved = new int[cells];
+            } else {
+                Arrays.fill(dx, 0, cells, 0f);
+                Arrays.fill(dy, 0, cells, 0f);
+                Arrays.fill(moved, 0, cells, 0);
+            }
+            hasField = true;
+        }
+    }
+
+    private static final Session session = new Session();
 
     private final ToneDocument document;
     private final ToolSettings settings;
     private final int width, height, cols, rows;
-    /** Output pixel p shows stroke-start content at p + D(p), bilinearly interpolated from this grid. */
-    private float[] dx, dy;
-    /**
-     * The resample pass that last needs each node: 0 for nodes this stroke never moved, whose
-     * pixels still show the stroke-start layer; {@link #pass} for nodes moved since the last one.
-     */
-    private int[] moved;
-    private int pass = 1;
     /** When the last resample ended and how long it took, for pacing; nanoseconds. */
     private long settledAt, settleCost;
-    private float[] scratchDx = new float[0], scratchDy = new float[0];
     private boolean started;
     private float lastX, lastY, lastRadius;
     /** Nodes moved since the last {@link #settle}: an inclusive node rectangle, empty when minX > maxX. */
@@ -48,9 +98,7 @@ final class LiquifyStroke implements DrawingStroke {
         this.rows = height / G + 2;
         // Liquify reshapes artwork, so it works on the layer even while gestures lay masking fluid.
         document.beginLayer();
-        int size = width * height;
-        if (baseTones.length < size) { baseTones = new byte[size]; baseAlpha = new byte[size]; }
-        document.copyLayer(0, 0, width, height, baseTones, baseAlpha);
+        if (!session.matches(document)) session.reset(document, cols, rows);
     }
 
     @Override public void sample(float x, float y, float pressure, float tiltX, float tiltY) {
@@ -59,28 +107,46 @@ final class LiquifyStroke implements DrawingStroke {
         y = Math.max(-128, Math.min(height + 128, y));
         float radius = settings.diameter(pressure) / 2f;
         float p = ToolSettings.travel(pressure);
+        boolean push = settings.liquify == ToolSettings.Liquify.PUSH;
         if (!started) {
             started = true; lastX = x; lastY = y; lastRadius = radius;
+            if (!push && settings.strength > 0 && p > 0) applyStep(x, y, 0, 0, radius, strength(p));
             return;
         }
         float mx = x - lastX, my = y - lastY;
         float dist = (float)Math.hypot(mx, my);
-        if (dist > 0 && settings.strength > 0 && p > 0) {
-            ensureField();
-            float maxStep = Math.max(.125f, Math.min(lastRadius, radius) / 4f);
-            int steps = Math.max(1, (int)Math.ceil(dist / maxStep));
-            float stepMx = mx / steps, stepMy = my / steps;
-            // A light touch already pushes firmly. Strength eases in, tuned on a Nomad: 50% moves
-            // the paint about a third of the way with the pen, 80% about three quarters.
-            float s = settings.strength / 100f;
-            float strength = (float)Math.pow(s, 1.4) * (.4f + .6f * (float)Math.sqrt(p));
-            for (int i = 1; i <= steps; i++) {
-                float t = (float)i / steps;
-                float r = lastRadius + (radius - lastRadius) * t;
-                pushField(lastX + mx * t, lastY + my * t, stepMx, stepMy, r, strength);
+        if (settings.strength > 0 && p > 0 && (dist > 0 || !push)) {
+            float strength = strength(p);
+            if (dist == 0) {
+                applyStep(x, y, 0, 0, radius, strength);
+            } else {
+                float maxStep = Math.max(.125f, Math.min(lastRadius, radius) / 4f);
+                int steps = Math.max(1, (int)Math.ceil(dist / maxStep));
+                float stepMx = mx / steps, stepMy = my / steps;
+                for (int i = 1; i <= steps; i++) {
+                    float t = (float)i / steps;
+                    float r = lastRadius + (radius - lastRadius) * t;
+                    applyStep(lastX + mx * t, lastY + my * t, stepMx, stepMy, r, strength);
+                }
             }
         }
         lastX = x; lastY = y; lastRadius = radius;
+    }
+
+    private float strength(float p) {
+        // A light touch already pushes firmly. Strength eases in, tuned on a Nomad: 50% moves
+        // the paint about a third of the way with the pen, 80% about three quarters.
+        float s = settings.strength / 100f;
+        return (float)Math.pow(s, 1.4) * (.4f + .6f * (float)Math.sqrt(p));
+    }
+
+    private void applyStep(float cx, float cy, float mx, float my, float r, float strength) {
+        if (settings.liquify == ToolSettings.Liquify.RECONSTRUCT) {
+            if (session.hasField) reconstructField(cx, cy, r, strength);
+        } else {
+            session.ensureField();
+            warpField(cx, cy, mx, my, r, strength);
+        }
     }
 
     /** Resamples what moved, unless the last resample was too recent to be worth another yet. */
@@ -93,7 +159,9 @@ final class LiquifyStroke implements DrawingStroke {
     private void resample() {
         if (pendMinX > pendMaxX || pendMinY > pendMaxY) return;
         long start = System.nanoTime();
-        int current = pass++;
+        int current = session.pass++;
+        float[] dx = session.dx, dy = session.dy;
+        int[] moved = session.moved;
         // A pixel blends the nodes on either side of it, so it reaches one grid step past them.
         int left = Math.max(0, (pendMinX - 1) * G), top = Math.max(0, (pendMinY - 1) * G);
         int right = Math.min(width, (pendMaxX + 1) * G), bottom = Math.min(height, (pendMaxY + 1) * G);
@@ -118,21 +186,22 @@ final class LiquifyStroke implements DrawingStroke {
                 else document.paintTone(x, y, pixel >>> 8, pixel & 255);
             }
         }
+        if (session.pass == Integer.MAX_VALUE) {
+            Arrays.fill(moved, 0, cols * rows, 0);
+            session.pass = 1;
+        }
         settledAt = System.nanoTime(); settleCost = settledAt - start;
     }
 
-    @Override public boolean finish() { resample(); return document.finish(); }
-
-    private void ensureField() {
-        if (dx == null) {
-            dx = new float[cols * rows];
-            dy = new float[cols * rows];
-            moved = new int[cols * rows];
-        }
+    @Override public boolean finish() {
+        resample();
+        boolean changed = document.finish();
+        session.edits = document.edits();
+        return changed;
     }
 
-    /** Composes one forward-warp sub-step into the displacement field: D_new(p) = D_old(p - w*m) - w*m. */
-    private void pushField(float cx, float cy, float mx, float my, float r, float strength) {
+    /** Composes one forward-warp sub-step into the displacement field: D_new(p) = D_old(p - V) - V. */
+    private void warpField(float cx, float cy, float mx, float my, float r, float strength) {
         float r2 = r * r;
         int copyMinX = Math.max(0, (int)Math.floor((cx - r) / G));
         int copyMinY = Math.max(0, (int)Math.floor((cy - r) / G));
@@ -142,10 +211,12 @@ final class LiquifyStroke implements DrawingStroke {
 
         int cw = copyMaxX - copyMinX + 1, ch = copyMaxY - copyMinY + 1;
         int need = cw * ch;
-        if (scratchDx.length < need) {
-            scratchDx = new float[need];
-            scratchDy = new float[need];
+        if (session.scratchDx.length < need) {
+            session.scratchDx = new float[need];
+            session.scratchDy = new float[need];
         }
+        float[] dx = session.dx, dy = session.dy, scratchDx = session.scratchDx, scratchDy = session.scratchDy;
+        int[] moved = session.moved;
         for (int gy = copyMinY; gy <= copyMaxY; gy++) {
             int srcOff = gy * cols + copyMinX;
             int dstOff = (gy - copyMinY) * cw;
@@ -161,6 +232,8 @@ final class LiquifyStroke implements DrawingStroke {
         pendMinX = Math.min(pendMinX, updMinX); pendMinY = Math.min(pendMinY, updMinY);
         pendMaxX = Math.max(pendMaxX, updMaxX); pendMaxY = Math.max(pendMaxY, updMaxY);
         float maxGridX = (cols - 1) * G, maxGridY = (rows - 1) * G;
+        ToolSettings.Liquify mode = settings.liquify;
+        int current = session.pass;
         for (int gy = updMinY; gy <= updMaxY; gy++) {
             float ny = gy * G, dyc = ny - cy, dyc2 = dyc * dyc;
             for (int gx = updMinX; gx <= updMaxX; gx++) {
@@ -169,9 +242,29 @@ final class LiquifyStroke implements DrawingStroke {
                 if (t2 >= 1f) continue;
                 float f = 1f - t2;
                 float w = strength * f * f;
-                float wmx = w * mx, wmy = w * my;
-                float qx = Math.max(0f, Math.min(maxGridX, nx - wmx));
-                float qy = Math.max(0f, Math.min(maxGridY, ny - wmy));
+                float vx, vy;
+                switch (mode) {
+                    case PUSH:
+                        vx = w * mx; vy = w * my;
+                        break;
+                    case BLOAT:
+                        vx = w * BLOAT_SCALE * dxc; vy = w * BLOAT_SCALE * dyc;
+                        break;
+                    case PINCH:
+                        vx = -w * BLOAT_SCALE * dxc; vy = -w * BLOAT_SCALE * dyc;
+                        break;
+                    case TWIRL_RIGHT: case TWIRL_LEFT: {
+                        float angle = (mode == ToolSettings.Liquify.TWIRL_RIGHT ? w : -w) * TWIRL_RADIANS;
+                        float cos = (float)Math.cos(angle), sin = (float)Math.sin(angle);
+                        vx = dxc * (cos - 1f) - dyc * sin;
+                        vy = dxc * sin + dyc * (cos - 1f);
+                        break;
+                    }
+                    default:
+                        continue;
+                }
+                float qx = Math.max(0f, Math.min(maxGridX, nx - vx));
+                float qy = Math.max(0f, Math.min(maxGridY, ny - vy));
                 float fx = qx / G, fy = qy / G;
                 int ix0 = Math.max(copyMinX, Math.min(copyMaxX, (int)Math.floor(fx)));
                 int iy0 = Math.max(copyMinY, Math.min(copyMaxY, (int)Math.floor(fy)));
@@ -187,14 +280,48 @@ final class LiquifyStroke implements DrawingStroke {
                 float oldDx = scratchDx[i00] * w00 + scratchDx[i10] * w10 + scratchDx[i01] * w01 + scratchDx[i11] * w11;
                 float oldDy = scratchDy[i00] * w00 + scratchDy[i10] * w10 + scratchDy[i01] * w01 + scratchDy[i11] * w11;
                 int idx = gy * cols + gx;
-                dx[idx] = oldDx - wmx;
-                dy[idx] = oldDy - wmy;
-                moved[idx] = pass;
+                dx[idx] = oldDx - vx;
+                dy[idx] = oldDy - vy;
+                moved[idx] = current;
             }
         }
     }
 
-    /** Premultiplied bilinear sample of the stroke-start active layer; outside the page is transparent. */
+    /** Relaxes displacements inside the brush toward zero (the session-start original). */
+    private void reconstructField(float cx, float cy, float r, float strength) {
+        float r2 = r * r;
+        int updMinX = Math.max(0, (int)Math.ceil((cx - r) / G));
+        int updMinY = Math.max(0, (int)Math.ceil((cy - r) / G));
+        int updMaxX = Math.min(cols - 1, (int)Math.floor((cx + r) / G));
+        int updMaxY = Math.min(rows - 1, (int)Math.floor((cy + r) / G));
+        if (updMinX > updMaxX || updMinY > updMaxY) return;
+        float[] dx = session.dx, dy = session.dy;
+        int[] moved = session.moved;
+        int current = session.pass;
+        boolean changed = false;
+        for (int gy = updMinY; gy <= updMaxY; gy++) {
+            float ny = gy * G, dyc = ny - cy, dyc2 = dyc * dyc;
+            for (int gx = updMinX; gx <= updMaxX; gx++) {
+                float nx = gx * G, dxc = nx - cx;
+                float t2 = (dxc * dxc + dyc2) / r2;
+                if (t2 >= 1f) continue;
+                int idx = gy * cols + gx;
+                if (dx[idx] == 0f && dy[idx] == 0f) continue;
+                float f = 1f - t2;
+                float keep = 1f - strength * f * f * RECONSTRUCT_RATE;
+                dx[idx] *= keep;
+                dy[idx] *= keep;
+                moved[idx] = current;
+                changed = true;
+            }
+        }
+        if (changed) {
+            pendMinX = Math.min(pendMinX, updMinX); pendMinY = Math.min(pendMinY, updMinY);
+            pendMaxX = Math.max(pendMaxX, updMaxX); pendMaxY = Math.max(pendMaxY, updMaxY);
+        }
+    }
+
+    /** Premultiplied bilinear sample of the session-start active layer; outside the page is transparent. */
     private int sampleBase(float srcX, float srcY) {
         float qx = srcX - .5f, qy = srcY - .5f;
         int x0 = (int)Math.floor(qx), y0 = (int)Math.floor(qy);
@@ -209,6 +336,6 @@ final class LiquifyStroke implements DrawingStroke {
     private int basePixel(int x, int y) {
         if (x < 0 || y < 0 || x >= width || y >= height) return 0;
         int i = y * width + x;
-        return (baseTones[i] & 255) << 8 | (baseAlpha[i] & 255);
+        return (session.baseTones[i] & 255) << 8 | (session.baseAlpha[i] & 255);
     }
 }

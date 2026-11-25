@@ -36,8 +36,10 @@ final class ToneDocument {
     private boolean maskTarget;
     /** The layer {@link #tones} and {@link #alpha} belong to: the active one, or the mask during a masking gesture. */
     private Layer bound;
-    private long revision;
+    private long revision, edits;
     long revision() { return revision; }
+    /** Monotonic count of committed changes to the page's pixels or active/layer state. */
+    long edits() { return edits; }
     static final class Layer {
         String name;
         boolean visible;
@@ -82,7 +84,7 @@ final class ToneDocument {
     private void bind(Layer layer) { bound=layer; tones=layer.tones; alpha=layer.alpha; }
     private void idle() { if(editing) throw new IllegalStateException("Finish the current gesture first"); }
     void selectLayer(int index) {
-        idle(); Layer layer=layers.get(index); if(active!=index)revision++;
+        idle(); Layer layer=layers.get(index); if(active!=index){revision++;edits++;}
         active=index; bind(layer);
     }
     /** Gestures from now on lay or, erasing, rub off masking fluid instead of painting the active layer. */
@@ -148,7 +150,7 @@ final class ToneDocument {
         StackState old=new StackState(this); layers.get(active).name=name; stackEdit(old);
     }
     private void stackEdit(StackState old) {
-        revision++;
+        revision++; edits++;
         addEdit(new Edit(old,new StackState(this))); markAllDirty();
     }
     /** Add transparent paper around every layer without resampling existing pixels. */
@@ -234,7 +236,7 @@ final class ToneDocument {
         for(Layer layer:all)
             if(layer.tones.length!=width*height||layer.alpha.length!=width*height) throw new IllegalArgumentException("Invalid layer pixels");
         layers.addAll(source); this.mask=mask;
-        selectLayer(active); captured=new boolean[columns()*((height+TILE-1)/TILE)]; clearDirty();
+        selectLayer(active); edits=0; captured=new boolean[columns()*((height+TILE-1)/TILE)]; clearDirty();
     }
     static void validateSize(int width, int height) {
         if (!validSize(width, height)) throw new IllegalArgumentException("Invalid canvas size");
@@ -557,6 +559,7 @@ final class ToneDocument {
         redo.clear();
         if (!tiles.isEmpty()) { Edit edit = new Edit(tiles,edited); undo.addLast(edit); historyBytes += edit.bytes; }
         while (historyBytes > HISTORY_BYTES && undo.size() > 1) historyBytes -= undo.removeFirst().bytes;
+        edits++;
         return true;
     }
     boolean canUndo() { return !undo.isEmpty(); }
@@ -612,6 +615,7 @@ final class ToneDocument {
             for (TileEdit tile : edit.tiles) restoreTile(tile.key, forward ? tile.after : tile.before);
             if(index<0) bind(layers.get(active));
         }
+        edits++;
         target.addLast(edit); return true;
     }
     /** Returns [left, top, right, bottom], without clearing it. */

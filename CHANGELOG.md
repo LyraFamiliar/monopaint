@@ -9,6 +9,14 @@ with each change; when cutting a release, turn that section into
 - New **Liquify** tool: push and nudge your drawing like it's made of putty.
   Drag to move what's under the brush on the current layer, with **Size** and
   **Strength** settings; each stroke is one Undo step.
+- **Liquify modes**: Liquify now offers **Push**, **Bloat** (expand outward),
+  **Pinch** (pull inward), **Twirl right** and **Twirl left** (swirl clockwise
+  or counter-clockwise), and **Reconstruct** (gently relax warped areas back
+  toward where you started). Bloat, Pinch, Twirl and Reconstruct also work
+  while you hold the pen still. Consecutive Liquify strokes on the same layer
+  keep working from your original picture so repeated nudges stay crisp
+  instead of getting blurry, and **Reconstruct** brings back the original until
+  you undo, switch layers, or paint with another tool.
 - New **Lasso** tool: draw a loop around part of the current layer to pick it
   up, then drag inside it to move it, drag a corner dot to resize it, or drag
   the round knob to turn it. The knob turns with the piece, so it stays under

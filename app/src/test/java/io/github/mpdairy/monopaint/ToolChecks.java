@@ -5,7 +5,7 @@ import java.util.Arrays;
 
 public final class ToolChecks {
     public static void main(String[] args) throws Exception {
-        gradientSettings(); presets(); favoriteIsolation(); favoriteNumbers(); flatHeight(); wideFlat(); customEdits(); presetDragOrder(); legacyPresets(); pressureResponse(); brushHeads(); tiltDirection(); sizeRanges(); fills(); tolerantFills(); softErase(); soften(); directionalBlend(); stumpStrength(); pencil(); brushPenMigration(); beforeLasso(); beforeLiquify();
+        gradientSettings(); presets(); favoriteIsolation(); favoriteNumbers(); flatHeight(); wideFlat(); customEdits(); presetDragOrder(); legacyPresets(); pressureResponse(); brushHeads(); tiltDirection(); sizeRanges(); fills(); tolerantFills(); softErase(); soften(); directionalBlend(); stumpStrength(); pencil(); brushPenMigration(); beforeLasso(); beforeLiquify(); beforeLiquifyModes();
         System.out.println("PASS: preset CRUD/order/recall/persistence, brush pen, lasso and liquify migration, bounded four-connected fill/cancel, soft eraser falloff, unbiased soften/edges, logical pencil texture/cap");
     }
     private static void brushPenMigration() throws Exception {
@@ -29,9 +29,9 @@ public final class ToolChecks {
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         in.readInt();out.writeInt(0x54535049);byte[] record=new byte[75];
-        for(int i=0;i<27;i++){in.readFully(record);if(i<12 || i>=14)out.write(record);}
+        for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(1);if(i<12 || i>=14)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
-        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);}
+        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(1);out.write(record);}
         check(in.read()==-1,"Pre-lasso fixture consumes every byte");
         ToolLibrary restored=ToolLibrary.decode(bytes.toByteArray());
         check(restored.current().equals(library.current()) && restored.activeId().equals(library.activeId()),"Pre-lasso format keeps the selected favorite");
@@ -44,9 +44,9 @@ public final class ToolChecks {
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         in.readInt();out.writeInt(0x5453504a);byte[] record=new byte[75];
-        for(int i=0;i<27;i++){in.readFully(record);if(i!=13)out.write(record);}
+        for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(1);if(i!=13)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
-        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);}
+        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(1);out.write(record);}
         check(in.read()==-1,"Pre-liquify fixture consumes every byte");
         ToolLibrary restored=ToolLibrary.decode(bytes.toByteArray());
         check(restored.current().equals(library.current()) && restored.activeId().equals(library.activeId()),"Pre-liquify format keeps the selected favorite");
@@ -56,12 +56,47 @@ public final class ToolChecks {
         ToolLibrary roundTrip=ToolLibrary.decode(restored.encode());
         check(roundTrip.builtin(ToolSettings.Tool.LIQUIFY).equals(restored.current()),"Liquify settings persist");
     }
+    /** Presets saved before Liquify modes (0x5453504b) load with PUSH; new modes round-trip and participate in identity. */
+    private static void beforeLiquifyModes() throws Exception {
+        ToolLibrary library=new ToolLibrary();
+        library.select(ToolSettings.Tool.LIQUIFY);
+        check(library.current().liquify==ToolSettings.Liquify.PUSH,"Liquify defaults to Push");
+        library.edit(library.current().liquify(ToolSettings.Liquify.BLOAT).size(120).strength(72));
+        ToolLibrary.Preset bloat=library.add();
+        library.edit(library.current().liquify(ToolSettings.Liquify.TWIRL_LEFT).strength(61));
+        check(!library.current().equals(library.current().liquify(ToolSettings.Liquify.PUSH)),"Liquify mode participates in settings identity");
+        check(library.builtin(ToolSettings.Tool.LIQUIFY).liquify==ToolSettings.Liquify.BLOAT,"Favorite mode is independent of built-in Liquify");
+        // Strip the trailing liquify-mode byte from every 76-byte record to construct a 0x5453504b payload.
+        java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
+        java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
+        in.readInt();out.writeInt(0x5453504b);byte[] record=new byte[75];
+        for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(1);out.write(record);}
+        out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
+        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(1);out.write(record);}
+        check(in.read()==-1,"Pre-liquify-modes fixture consumes every byte");
+        ToolLibrary migrated=ToolLibrary.decode(bytes.toByteArray());
+        check(migrated.builtin(ToolSettings.Tool.LIQUIFY).liquify==ToolSettings.Liquify.PUSH
+                && migrated.builtin(ToolSettings.Tool.LIQUIFY).maximum==120 && migrated.builtin(ToolSettings.Tool.LIQUIFY).strength==72,
+                "Pre-modes Liquify loads with Push while preserving size and strength");
+        check(migrated.current().liquify==ToolSettings.Liquify.PUSH && migrated.current().strength==61 && migrated.activeId().equals(bloat.id),
+                "Pre-modes Liquify favorite loads with Push while preserving identity and strength");
+        for(ToolSettings.Liquify mode:ToolSettings.Liquify.values()) {
+            library.select(ToolSettings.Tool.LIQUIFY);library.edit(library.current().liquify(mode));
+            ToolLibrary restored=ToolLibrary.decode(library.encode());
+            check(restored.current().liquify==mode && restored.builtin(ToolSettings.Tool.LIQUIFY).liquify==mode,"Liquify mode round-trips: "+mode);
+        }
+        try { library.current().liquify(null); throw new AssertionError("Null liquify mode accepted"); }
+        catch(IllegalArgumentException expected) {}
+        byte[] invalid=library.encode(); invalid[4+75]=(byte)255;
+        try { ToolLibrary.decode(invalid); throw new AssertionError("Unknown liquify mode accepted"); }
+        catch(IOException expected) {}
+    }
     /** A format whose records stop after {@code kept} bytes, before the newer oil paint fields. */
     private static void beforeOilField(int version, int kept) throws Exception {
         ToolLibrary library=new ToolLibrary();library.select(ToolSettings.Tool.BRUSH);library.edit(library.current().oilPaint(true).paintLoad(30));library.add("Oil");
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
-        in.readInt();out.writeInt(version);byte[] record=new byte[kept];int skipped=75-kept;
+        in.readInt();out.writeInt(version);byte[] record=new byte[kept];int skipped=76-kept;
         for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(skipped);if(i<12 || i>=14)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
         for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(skipped);out.write(record);}
@@ -75,9 +110,9 @@ public final class ToolChecks {
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         // Those formats predate the carry and oil paint fields that end each record.
         in.readInt();out.writeInt(version);byte[] record=new byte[54];
-        for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(21);if(i<tools || i>=14)out.write(record);}
+        for(int i=0;i<27;i++){in.readFully(record);in.skipBytes(22);if(i<tools || i>=14)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
-        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(21);out.write(record);}
+        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(22);out.write(record);}
         check(in.read()==-1,"Previous format fixture consumes every byte");
         ToolLibrary restored=ToolLibrary.decode(bytes.toByteArray());
         check(restored.current().equals(library.current()) && restored.activeId().equals(library.activeId()),"Previous format retains the selected favorite");
@@ -132,10 +167,10 @@ public final class ToolChecks {
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         in.readInt();out.writeInt(0x5453503d);byte[] record=new byte[47];
-        for(int i=0;i<27;i++){in.readFully(record);if(i<8 || i>=14)out.write(record);in.readUnsignedByte();in.skipBytes(27);}
+        for(int i=0;i<27;i++){in.readFully(record);if(i<8 || i>=14)out.write(record);in.readUnsignedByte();in.skipBytes(28);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
         for(int i=0;i<count;i++) {
-            out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);in.readUnsignedByte();in.skipBytes(27);
+            out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);in.readUnsignedByte();in.skipBytes(28);
         }
         check(in.read()==-1,"Legacy fixture consumes every record");return bytes.toByteArray();
     }
